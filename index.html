@@ -42,6 +42,14 @@ document.getElementById('btn').onclick = async () => {
                 log('getViewerPose(null) threw: ' + e);
             }
         });
+
+        session.requestReferenceSpace('invalid-type-that-doesnt-exist')
+            .then(rs => log('Got invalid ref space: ' + rs))
+            .catch(e => log('invalid ref space error: ' + e));
+
+        for(let i = 0; i < 10000; i++) {
+            session.requestAnimationFrame(() => {});
+        }
         
     } catch(e) {
         log('requestSession failed: ' + e);
