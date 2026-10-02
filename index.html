@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head><title>XR Test</title></head>
+<body style="background:#000;color:#0f0;font-family:monospace;font-size:24px;padding:20px;">
+<div id="out"></div>
+<button id="btn" style="font-size:30px;padding:20px;margin:20px;">START XR SESSION</button>
+<script>
+const out = document.getElementById('out');
+const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
+
+log('navigator.xr: ' + (navigator.xr ? 'EXISTS' : 'MISSING'));
+
+if (navigator.xr) {
+    navigator.xr.isSessionSupported('immersive-vr').then(s => {
+        log('immersive-vr supported: ' + s);
+    });
+    navigator.xr.isSessionSupported('inline').then(s => {
+        log('inline supported: ' + s);
+    });
+}
+
+document.getElementById('btn').onclick = async () => {
+    log('Requesting immersive-vr session...');
+    try {
+        const session = await navigator.xr.requestSession('immersive-vr');
+        log('SESSION OBTAINED: ' + JSON.stringify(session));
+        log('session.inputSources: ' + session.inputSources.length);
+        
+        // Try sending malformed frame requests
+        session.addEventListener('end', () => log('Session ended'));
+        
+        // Request animation frame
+        session.requestAnimationFrame((time, frame) => {
+            log('Frame received: time=' + time);
+            log('frame.session: ' + frame.session);
+            
+            // Try to get pose with null reference space
+            try {
+                const pose = frame.getViewerPose(null);
+                log('getViewerPose(null): ' + pose);
+            } catch(e) {
+                log('getViewerPose(null) threw: ' + e);
+            }
+        });
+        
+    } catch(e) {
+        log('requestSession failed: ' + e);
+        log('Error name: ' + e.name);
+        log('Error message: ' + e.message);
+    }
+};
+</script>
+</body>
+</html>
