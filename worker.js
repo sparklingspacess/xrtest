@@ -12,7 +12,7 @@ function low(i) { return i & 0xffffffffn; }
 
 const WARM = 410;   
 
-const F = 1313, L = 21, P = 120;
+const F = 1250, L = 21, P = 120;
 const BASE = 850, STEP = 8, WINDOW = 36;
 let loads = '';
 for (let i = 0; i < F; ++i) {
