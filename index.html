@@ -16,6 +16,7 @@ log('journey web vuln (oct 3rd 2026)');
 const button = document.getElementById('exploitButton');
 const hoverSound = new Audio('sfx_hover.ogg');
 const pressSound = new Audio('sfx_release_main.ogg');
+const passSound = new Audio('sfx_system_gesture.ogg');
 hoverSound.preload = 'auto';
 pressSound.preload = 'auto';
 let audioUnlocked = false;
@@ -83,6 +84,7 @@ button.addEventListener('click', () => {
                 worker.terminate();
                 const elapsed = ((performance.now() - start) / 1000).toFixed(2);
                 fails = 0;
+                passSound.play();
                 log(`pass - arb r/w in v8 heap`);
                 log(`result: ${data}`);
                 log(`try: ${tries} | time: ${elapsed}s`);
