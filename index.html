@@ -53,6 +53,7 @@ button.addEventListener('click', () => {
     const script = document.createElement('script');
     script.src = 'exploit_3079.js';
     script.onload = () => {
+        diagTest();
         const success = pwn(log);
         if (success) {
             log('exploit succeeded!');
