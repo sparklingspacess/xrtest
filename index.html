@@ -1,8 +1,22 @@
 <!doctype html>
 <html>
 <head><title>q1shell</title></title></head>
-<body style="background:#000;color:#FFF;font-family:monospace;font-size:7px;padding:0px;">
+<body style="background:#000;color:#FFF;font-family:monospace;font-size:12px;padding:0px;">
 <div id="out"></div>
-<script src="exploit_3079.js"></script>
+<script src="poc.js"></script>
+<script>
+const out = document.getElementById('out');
+
+function log(x) {
+    out.textContent += x + '\n';
+}
+
+pwn(log).then(result => {
+    log('');
+    log('result: ' + result);
+}).catch(e => {
+    log('[!] exception: ' + e);
+});
+</script>
 </body>
 </html>
