@@ -1,17 +1,31 @@
 <!doctype html>
 <html>
-<head><title>q1shell - crash2</title></head>
+<head><title>q1shell</title></head>
 <body style="background:#000;color:#0f0;font-family:monospace;font-size:12px;padding:20px;">
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
-const s = await VideoDecoder.isConfigSupported({
+VideoDecoder.isConfigSupported({
     codec: 'avc1.42001E',
     codedWidth: 64,
     codedHeight: 64,
-});
-log('H264 decode only: ' + s.supported);
+}).then(s => log('H264 decode: ' + s.supported))
+  .catch(e => log('error: ' + e));
+
+VideoDecoder.isConfigSupported({
+    codec: 'avc1.640028',
+    codedWidth: 64,
+    codedHeight: 64,
+}).then(s => log('H264 high: ' + s.supported))
+  .catch(e => log('error: ' + e));
+
+VideoDecoder.isConfigSupported({
+    codec: 'hev1.1.6.L93.B0',
+    codedWidth: 64,
+    codedHeight: 64,
+}).then(s => log('HEVC: ' + s.supported))
+  .catch(e => log('error: ' + e));
 </script>
 </body>
 </html>
