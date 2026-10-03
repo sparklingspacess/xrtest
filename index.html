@@ -14,34 +14,9 @@ const out = document.getElementById('out');
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 log('journey web vuln (oct 3rd 2026)');
 const button = document.getElementById('exploitButton');
-const hoverSound = new Audio('sfx_hover.ogg');
-const pressSound = new Audio('sfx_release_main.ogg');
 const passSound = new Audio('sfx_system_gesture.ogg');
-hoverSound.preload = 'auto';
-pressSound.preload = 'auto';
-let audioUnlocked = false;
 let fuckingAround = false;
 let fails = 0;
-document.addEventListener('pointerdown', () => {
-    if (audioUnlocked)
-    {
-        return;
-    }
-    hoverSound.volume = 0;
-    hoverSound.play().then(() => { hoverSound.pause(); hoverSound.currentTime = 0; hoverSound.volume = 1; audioUnlocked = true; }).catch(() => {});
-}, { once: true });
-button.addEventListener('mouseenter', () => {
-    if (!audioUnlocked)
-    {
-        return;
-    }
-    hoverSound.currentTime = 0;
-    hoverSound.play();
-});
-button.addEventListener('mousedown', () => {
-    pressSound.currentTime = 0;
-    pressSound.play();
-});
 button.addEventListener('click', () => {
     if (fuckingAround)
     {
