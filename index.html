@@ -51,17 +51,8 @@ button.addEventListener('click', () => {
     alert('Press OK to start the exploit.\n\nYour headset may encounter issues during this.\nIf so, please reboot your headset and try again.\n\nIn no way is this root, this is demo PoC for exploits\nwithin the Quest Browser and is still limited in terms of power.\n\nThis is designed for the Quest 1 ONLY.\nThis will NOT work on newer headsets.');
     log('loading exploit...');
     const script = document.createElement('script');
-    script.src = 'exploit_3079.js';
-    script.onload = () => {
-        diagTest();
-        const success = pwn(log);
-        if (success) {
-            log('exploit succeeded!');
-            passSound.play();
-        } else {
-            log('exploit failed or patched');
-        }
-    };
+    script.src = 'poc.js';
+    document.head.appendChild(script);
     document.head.appendChild(script);
 });
 </script>
