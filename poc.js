@@ -1,3 +1,12 @@
+function gc(opts) {
+    // Replace explicit GC with allocation pressure
+    const type = opts && opts.type;
+    const count = type === 'major' ? 200 : 50;
+    for (let i = 0; i < count; i++) {
+        new ArrayBuffer(0x100000); // 1MB chunks
+    }
+}
+
 function confuse(a) {
   function compare() { a.fill(0); return -1; }
   a.sort(compare);
