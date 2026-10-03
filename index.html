@@ -5,80 +5,81 @@
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
-log('WebCodecs Oilpan arena test v2');
-log('');
 
-// Single shared canvas for all VideoFrame creation
-const sharedCanvas = new OffscreenCanvas(4, 4);
-const sharedBitmap = await createImageBitmap(new ImageData(4,4));
+async function main() {
+    log('WebCodecs Oilpan arena test v2');
+    log('');
 
-async function getBaseline() {
-    const canvas = new OffscreenCanvas(64, 64);
-    const gl = canvas.getContext('webgl');
-    gl.clearColor(1.0, 0.0, 0.0, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.finish();
-    const bf = new VideoFrame(canvas, {timestamp:0});
-    const bb = new Uint8Array(bf.allocationSize());
-    await bf.copyTo(bb);
-    bf.close();
-    return {canvas, gl, bb};
+    const sharedCanvas = new OffscreenCanvas(4, 4);
+    const sharedBitmap = await createImageBitmap(new ImageData(4,4));
+
+    async function getBaseline() {
+        const canvas = new OffscreenCanvas(64, 64);
+        const gl = canvas.getContext('webgl');
+        gl.clearColor(1.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.finish();
+        const bf = new VideoFrame(canvas, {timestamp:0});
+        const bb = new Uint8Array(bf.allocationSize());
+        await bf.copyTo(bb);
+        bf.close();
+        return {canvas, gl, bb};
+    }
+
+    async function test(label, make, destroy) {
+        const {canvas, gl, bb} = await getBaseline();
+        const objs = [];
+        for (let i = 0; i < 2000; i++) {
+            try { objs.push(make(i)); } catch(e) {}
+        }
+        if (destroy) objs.forEach(o => { try { destroy(o); } catch(e){} });
+        objs.length = 0;
+
+        let hits = 0;
+        for (let a = 0; a < 30; a++) {
+            gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
+            const f = new VideoFrame(canvas, {timestamp: a*1000});
+            const buf = new Uint8Array(f.allocationSize());
+            const p = f.copyTo(buf);
+            f.close();
+            const s = [];
+            for (let j = 0; j < 30; j++) { try { s.push(make(j)); } catch(e){} }
+            await p;
+            if (destroy) s.forEach(o => { try { destroy(o); } catch(e){} });
+            s.length = 0;
+            if (buf.some((b,i) => b !== bb[i])) hits++;
+        }
+        log((hits > 0 ? '[HIT] ' : '[ -- ] ') + label + ': ' + hits + '/30');
+        return hits;
+    }
+
+    const fakeData = new Uint8Array(16).fill(0x41);
+    const audioData = new Float32Array(128);
+
+    const tests = [
+        ['VideoFrame(sharedCanvas)', i => new VideoFrame(sharedCanvas, {timestamp:i}), f => f.close()],
+        ['VideoFrame(ImageBitmap)',  i => new VideoFrame(sharedBitmap, {timestamp:i}),  f => f.close()],
+        ['EncodedVideoChunk',        i => new EncodedVideoChunk({type:'key',timestamp:i,data:fakeData}), null],
+        ['EncodedAudioChunk',        i => new EncodedAudioChunk({type:'key',timestamp:i,data:fakeData}), null],
+        ['AudioData',                i => new AudioData({format:'f32',sampleRate:44100,numberOfFrames:128,numberOfChannels:1,timestamp:i,data:audioData}), a => a.close()],
+        ['VideoDecoder',             i => new VideoDecoder({output:f=>f.close(),error:()=>{}}), null],
+        ['AudioDecoder',             i => new AudioDecoder({output:a=>a.close(),error:()=>{}}), null],
+        ['VideoEncoder',             i => new VideoEncoder({output:()=>{},error:()=>{}}), null],
+    ];
+
+    for (const [label, make, destroy] of tests) {
+        try {
+            await test(label, make, destroy);
+        } catch(e) {
+            log('[ EE ] ' + label + ': ' + e.message);
+        }
+    }
+
+    log('');
+    log('Done.');
 }
 
-async function test(label, make, destroy) {
-    const {canvas, gl, bb} = await getBaseline();
-    
-    const objs = [];
-    for (let i = 0; i < 2000; i++) {
-        try { objs.push(make(i)); } catch(e) {}
-    }
-    if (destroy) objs.forEach(o => { try { destroy(o); } catch(e){} });
-    objs.length = 0;
-
-    let hits = 0;
-    for (let a = 0; a < 30; a++) {
-        gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); gl.finish();
-        const f = new VideoFrame(canvas, {timestamp: a*1000});
-        const buf = new Uint8Array(f.allocationSize());
-        const p = f.copyTo(buf);
-        f.close();
-        const s = [];
-        for (let j = 0; j < 30; j++) { try { s.push(make(j)); } catch(e){} }
-        await p;
-        if (destroy) s.forEach(o => { try { destroy(o); } catch(e){} });
-        s.length = 0;
-        if (buf.some((b,i) => b !== bb[i])) hits++;
-    }
-    log((hits > 0 ? '[HIT] ' : '[ -- ] ') + label + ': ' + hits + '/30');
-    return hits;
-}
-
-const fakeData = new Uint8Array(16).fill(0x41);
-const audioData = new Float32Array(128);
-
-// Use shared canvas for all VideoFrame creation
-const tests = [
-    ['VideoFrame(sharedCanvas)',  i => new VideoFrame(sharedCanvas, {timestamp:i}),  f => f.close()],
-    ['VideoFrame(ImageBitmap)',   i => new VideoFrame(sharedBitmap, {timestamp:i}),  f => f.close()],
-    ['EncodedVideoChunk',         i => new EncodedVideoChunk({type:'key',timestamp:i,data:fakeData}), null],
-    ['EncodedAudioChunk',         i => new EncodedAudioChunk({type:'key',timestamp:i,data:fakeData}), null],
-    ['AudioData',                 i => new AudioData({format:'f32',sampleRate:44100,numberOfFrames:128,numberOfChannels:1,timestamp:i,data:audioData}), a => a.close()],
-    ['VideoDecoder',              i => new VideoDecoder({output:f=>f.close(),error:()=>{}}), null],
-    ['AudioDecoder',              i => new AudioDecoder({output:a=>a.close(),error:()=>{}}), null],
-    ['VideoEncoder',              i => new VideoEncoder({output:()=>{},error:()=>{}}), null],
-    ['AudioEncoder',              i => { try { return new AudioEncoder({output:()=>{},error:()=>{}}) } catch(e){return {}} }, null],
-];
-
-for (const [label, make, destroy] of tests) {
-    try {
-        await test(label, make, destroy);
-    } catch(e) {
-        log('[ EE ] ' + label + ': ' + e.message);
-    }
-}
-
-log('');
-log('Done.');
+main().catch(e => log('FATAL: ' + e));
 </script>
 </body>
 </html>
