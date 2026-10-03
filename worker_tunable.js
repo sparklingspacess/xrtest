@@ -2,6 +2,7 @@
 // Based on Serotav's Racing V8 writeup (Chromium issue 560233248)
 // F value is configurable via 'config' message
 
+//d
 var f64 = new Float64Array(1);
 var bigUint64 = new BigUint64Array(f64.buffer);
 var u32 = new Uint32Array(f64.buffer);
