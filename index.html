@@ -49,6 +49,24 @@ button.addEventListener('click', () => {
     }
     fuckingAround = true;
     alert('Press OK to start the exploit.\n\nYour headset may encounter issues during this.\nIf so, please reboot your headset and try again.\n\nIn no way is this root, this is demo PoC for exploits\nwithin the Quest Browser and is still limited in terms of power.\n\nTHIS WILL LIKELY BE PATCHED SOON\nDO WITH THAT AS YOU WILL');
+    
+    //Test for maglev
+    function test() {
+        let x = 0;
+        for (let i = 0; i < 1000; i++) x += i;
+        return x;
+    }
+    //Warm to Maglev tier (about 400 calls)
+    for (let i = 0; i < 500; i++) test();
+    const t0 = performance.now();
+    for (let i = 0; i < 100000; i++) test();
+    log((performance.now() - t0).toFixed(1) + 'ms (maglev)');
+
+    if ((performance.now() - t0).toFixed(1) > 500)
+    {
+        log('maglev unlikely');
+    }
+    
     //Launch the race exploit
     const start = performance.now();
     let tries = 0;
