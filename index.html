@@ -1,62 +1,53 @@
 <!doctype html>
 <html>
-<head><title>XR Test</title></head>
-<body style="background:#000;color:#0f0;font-family:monospace;font-size:24px;padding:20px;">
+<head><title>Journey</title></head>
+<body style="background:#000;color:#FFF;font-family:monospace;font-size:12px;padding:0px;">
 <div id="out"></div>
-<button id="btn" style="font-size:30px;padding:20px;margin:20px;">START XR SESSION</button>
+<div style="position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 10px;">
+    <img src="oculus.png">
+    <button id="exploitButton">
+        Start Exploit
+    </button>
+</div>
 <script>
 const out = document.getElementById('out');
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
-
-log('navigator.xr: ' + (navigator.xr ? 'EXISTS' : 'MISSING'));
-
-if (navigator.xr) {
-    navigator.xr.isSessionSupported('immersive-vr').then(s => {
-        log('immersive-vr supported: ' + s);
-    });
-    navigator.xr.isSessionSupported('inline').then(s => {
-        log('inline supported: ' + s);
-    });
-}
-
-document.getElementById('btn').onclick = async () => {
-    log('Requesting immersive-vr session...');
-    try {
-        const session = await navigator.xr.requestSession('immersive-vr');
-        log('SESSION OBTAINED: ' + JSON.stringify(session));
-        log('session.inputSources: ' + session.inputSources.length);
-        
-        // Try sending malformed frame requests
-        session.addEventListener('end', () => log('Session ended'));
-        
-        // Request animation frame
-        session.requestAnimationFrame((time, frame) => {
-            log('Frame received: time=' + time);
-            log('frame.session: ' + frame.session);
-            
-            // Try to get pose with null reference space
-            try {
-                const pose = frame.getViewerPose(null);
-                log('getViewerPose(null): ' + pose);
-            } catch(e) {
-                log('getViewerPose(null) threw: ' + e);
-            }
-        });
-
-        session.requestReferenceSpace('invalid-type-that-doesnt-exist')
-            .then(rs => log('Got invalid ref space: ' + rs))
-            .catch(e => log('invalid ref space error: ' + e));
-
-        for(let i = 0; i < 10000; i++) {
-            session.requestAnimationFrame(() => {});
-        }
-        
-    } catch(e) {
-        log('requestSession failed: ' + e);
-        log('Error name: ' + e.name);
-        log('Error message: ' + e.message);
+log('journey web vuln (oct 3rd 2026)');
+const button = document.getElementById('exploitButton');
+const hoverSound = new Audio('sfx_hover.ogg');
+const pressSound = new Audio('sfx_release_main.ogg');
+hoverSound.preload = 'auto';
+pressSound.preload = 'auto';
+let audioUnlocked = false;
+let fuckingAround = false;
+document.addEventListener('pointerdown', () => {
+    if (audioUnlocked)
+    {
+        return;
     }
-};
+    hoverSound.volume = 0;
+    hoverSound.play().then(() => { hoverSound.pause(); hoverSound.currentTime = 0; hoverSound.volume = 1; audioUnlocked = true; }).catch(() => {});
+}, { once: true });
+button.addEventListener('mouseenter', () => {
+    if (!audioUnlocked)
+    {
+        return;
+    }
+    hoverSound.currentTime = 0;
+    hoverSound.play();
+});
+button.addEventListener('mousedown', () => {
+    pressSound.currentTime = 0;
+    pressSound.play();
+});
+button.addEventListener('click', () => {
+    if (!fuckingAround)
+    {
+        fuckingAround = true;
+        alert('Exploit starting now, sit tight.\n\nYour headset may encounter issues during this.\nIf so, please reboot your headset and try again.\n\nIn no way is this root, this is a PoC for exploits\nwithin the Quest Browser and is still limited in terms of power.\n\nThis is an adaptation from a PoC for CVE-2026-95380 \n\nTHIS WILL LIKELY BE PATCHED SOON\nDO WITH THAT AS YOU WILL');
+    }
+});
 </script>
+
 </body>
 </html>
